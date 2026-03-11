@@ -1,0 +1,13 @@
+.content-page { 
+  max-width: 896px;
+   margin: 64px auto;
+    padding: 0 16px; 
+    }
+.page-title {
+   font-size: 24px; 
+   font-weight: 700;
+    margin-bottom: 16px; 
+    }
+.page-text {
+   color: #52525b; 
+   }

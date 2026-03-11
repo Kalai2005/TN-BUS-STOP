@@ -1,0 +1,7 @@
+{
+  "name": "TN Smart Bus System",
+  "description": "A centralized digital platform for public and private bus transportation in Tamil Nadu, featuring real-time search, QR ticketing, and administrative management.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

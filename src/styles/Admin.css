@@ -1,0 +1,128 @@
+.admin-page { 
+  max-width: 1280px; 
+  margin: 64px auto; 
+  padding: 0 16px;
+   }
+.admin-header { 
+  display: flex;
+   justify-content: space-between; 
+   align-items: center;
+    margin-bottom: 48px;
+     }
+.admin-title {
+   font-size: 30px; 
+   font-weight: 700;
+    }
+.auth-badge {
+   background-color: #d1fae5; 
+   color: #047857;
+    padding: 8px 16px; 
+    border-radius: 8px; 
+    font-weight: 700;
+     font-size: 14px; 
+     display: flex;
+      align-items: center; 
+      }
+.badge-icon { 
+  width: 16px;
+   height: 16px;
+    margin-right: 8px;
+     }
+.stats-grid
+ { display: grid;
+  grid-template-columns: 1fr;
+   gap: 32px; 
+   margin-bottom: 48px;
+    }
+@media (min-width: 768px) {
+   .stats-grid { grid-template-columns: repeat(3, 1fr); 
+   }
+    }
+.stats-card {
+   background-color: #ffffff;
+    border: 1px solid #e4e4e7;
+     padding: 32px;
+      border-radius: 24px; 
+      }
+.stats-card.dark { background-color: #18181b;
+ color: #ffffff;
+  }
+.stats-label { color: #a1a1aa;
+ font-size: 12px; 
+ font-weight: 700;
+  text-transform: uppercase; 
+  letter-spacing: 0.1em; 
+  margin-bottom: 8px; 
+  }
+.stats-label.accent { 
+  color: #34d399;
+   }
+.stats-value { 
+  font-size: 36px;
+   font-weight: 700; 
+   }
+.inventory-section { 
+  background-color: #ffffff; 
+  border: 1px solid #e4e4e7;
+   border-radius: 24px; 
+   overflow: hidden; 
+   }
+.inventory-header { 
+  padding: 24px; 
+  border-bottom: 1px solid #e4e4e7; 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center;
+   }
+.inventory-title {
+   font-weight: 700;
+    font-size: 18px;
+     }
+.add-bus-btn {
+   background-color: #18181b;
+    color: #ffffff;
+     padding: 8px 16px;
+      border-radius: 12px;
+       font-size: 14px;
+        font-weight: 700;
+         }
+.table-wrapper {
+   overflow-x: auto; 
+   }
+.admin-table {
+   width: 100%; 
+   border-collapse: collapse; 
+   text-align: left;
+    }
+.admin-table th {
+   background-color: #fafafa;
+    color: #a1a1aa; 
+    font-size: 12px; 
+    font-weight: 700; 
+    text-transform: uppercase; 
+    letter-spacing: 0.1em;
+     padding: 16px 24px; }
+.admin-table td { 
+  padding: 16px 24px; 
+  border-bottom: 1px solid #f4f4f5;
+   }
+.table-row:hover {
+   background-color: #fafafa; 
+   }
+.mono-bold { 
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace; 
+  font-weight: 700;
+   }
+.text-muted {
+   color: #71717a;
+    }
+.status-badge {
+   background-color: #d1fae5; 
+   color: #047857;
+    font-size: 10px;
+     font-weight: 700; 
+     padding: 4px 8px; 
+     border-radius: 4px;
+      }
+.edit-btn { color: #a1a1aa; font-weight: 600; }
+.edit-btn:hover { color: #18181b; }

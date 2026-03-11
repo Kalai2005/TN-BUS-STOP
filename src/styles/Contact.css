@@ -1,0 +1,18 @@
+.content-page { 
+  max-width: 896px; 
+  margin: 96px auto;
+   padding: 0 16px;
+    }
+.content-page.center {
+   text-align: center;
+    }
+.page-title {
+   font-size: 36px; 
+   font-weight: 700;
+    margin-bottom: 32px;
+     }
+.contact-info {
+   color: #52525b;
+    font-size: 18px; 
+    margin-bottom: 8px; 
+    }

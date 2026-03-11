@@ -1,0 +1,355 @@
+import React, { useState, useEffect } from 'react';
+import { format } from 'date-fns';
+import { Ticket, XCircle, AlertTriangle, QrCode, X } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { QRCodeSVG } from 'qrcode.react';
+import { api } from '../services/api';
+import '../styles/MyBookings.css';
+import { useLanguage } from '../context/LanguageContext';
+
+export const MyBookings = () => {
+  const { language } = useLanguage();
+  const text = language === 'ta'
+    ? {
+        pageTitle: 'என் பயண வரலாறு',
+        digitalTicket: 'டிஜிட்டல் டிக்கெட்',
+        presentTicket: 'பேருந்தில் ஏறும் போது சரிபார்ப்பிற்கு இந்த டிக்கெட்டை காட்டவும்.',
+        route: 'பாதை',
+        journey: 'பயணம்',
+        seat: 'இருக்கை',
+        fare: 'கட்டணம்',
+        passenger: 'பயணி',
+        bus: 'பஸ்',
+        ticketDetails: 'டிக்கெட் விவரங்கள்',
+        status: 'நிலை',
+        cancel: 'ரத்து',
+        loading: 'ஏற்றுகிறது...',
+        noBookings: 'இன்னும் முன்பதிவுகள் இல்லை.',
+        allocatedBoarding: 'ஏறும் போது ஒதுக்கப்படும்',
+        cancelBooking: 'முன்பதிவை ரத்து செய்யவா?',
+        cancelWarn: 'இந்த முன்பதிவை ரத்து செய்ய விரும்புகிறீர்களா? இந்த செயலையை மாற்ற முடியாது.',
+        keep: 'இல்லை, வைத்திருக்கவும்',
+        yesCancel: 'ஆம், ரத்து செய்',
+        cancelling: 'ரத்து செய்கிறது...',
+      }
+    : {
+        pageTitle: 'My Travel History',
+        digitalTicket: 'Digital Ticket',
+        presentTicket: 'Present this ticket at boarding for verification.',
+        route: 'Route',
+        journey: 'Journey',
+        seat: 'Seat',
+        fare: 'Fare',
+        passenger: 'Passenger',
+        bus: 'Bus',
+        ticketDetails: 'Ticket Details',
+        status: 'Status',
+        cancel: 'Cancel',
+        loading: 'Loading...',
+        noBookings: 'No bookings found yet.',
+        allocatedBoarding: 'Allocated at boarding',
+        cancelBooking: 'Cancel Booking?',
+        cancelWarn: 'Are you sure you want to cancel this booking? This action cannot be undone.',
+        keep: 'No, Keep it',
+        yesCancel: 'Yes, Cancel',
+        cancelling: 'Cancelling...',
+      };
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [cancellingId, setCancellingId] = useState(null);
+  const [selectedBooking, setSelectedBooking] = useState(null);
+  const [selectedSchedule, setSelectedSchedule] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const formatTime = (value) => {
+    if (!value) return 'N/A';
+    const [hours, minutes] = String(value).split(':');
+    if (hours === undefined || minutes === undefined) return value;
+
+    const hourNumber = Number(hours);
+    if (Number.isNaN(hourNumber)) return value;
+
+    const meridiem = hourNumber >= 12 ? 'PM' : 'AM';
+    const formattedHour = hourNumber % 12 || 12;
+    return `${formattedHour}:${minutes} ${meridiem}`;
+  };
+
+  const formatSeat = (seatNumber) => {
+    if (!seatNumber || seatNumber === 'N/A') return text.allocatedBoarding;
+    return seatNumber;
+  };
+
+  useEffect(() => {
+    fetchBookings();
+  }, []);
+
+  useEffect(() => {
+    const loadScheduleDetails = async () => {
+      if (!selectedBooking?.schedule_id) {
+        setSelectedSchedule(null);
+        return;
+      }
+
+      try {
+        const schedule = await api.getScheduleById(selectedBooking.schedule_id);
+
+        if (schedule && schedule.success !== false) {
+          setSelectedSchedule(schedule);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to load schedule details:', err);
+      }
+
+      setSelectedSchedule(null);
+    };
+
+    loadScheduleDetails();
+  }, [selectedBooking]);
+
+  const fetchBookings = () => {
+    setLoading(true);
+    api.getUserBookings(1)
+      .then(data => {
+        setBookings(data);
+        setLoading(false);
+      });
+  };
+
+  const activeBooking = selectedBooking
+    ? {
+        ...selectedBooking,
+        fare: selectedSchedule?.fare ?? selectedBooking.fare,
+        distance_km: selectedSchedule?.distance_km ?? selectedBooking.distance_km,
+        operator: selectedSchedule?.operator ?? selectedBooking.operator,
+        bus_type: selectedSchedule?.bus_type ?? selectedBooking.bus_type,
+        bus_number: selectedSchedule?.bus_number ?? selectedBooking.bus_number,
+        departure_time: selectedSchedule?.departure_time ?? selectedBooking.departure_time,
+        arrival_time: selectedSchedule?.arrival_time ?? selectedBooking.arrival_time,
+        source: selectedSchedule?.source ?? selectedBooking.source,
+        destination: selectedSchedule?.destination ?? selectedBooking.destination,
+      }
+    : null;
+
+  const handleCancel = async () => {
+    if (!cancellingId) return;
+    setIsProcessing(true);
+    try {
+      const res = await fetch(`/api/bookings/${cancellingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'cancelled' })
+      });
+      if (res.ok) {
+        
+        fetchBookings();
+        setCancellingId(null);
+      }
+    } catch (err) {
+      console.error('Failed to cancel booking:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <div className="my-bookings-page">
+      <h2 className="page-title">{text.pageTitle}</h2>
+      
+      <AnimatePresence>
+        {activeBooking && (
+          <div className="modal-overlay" onClick={() => setSelectedBooking(null)}>
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="ticket-modal"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button className="close-modal-btn" onClick={() => setSelectedBooking(null)}>
+                <X size={24} />
+              </button>
+              <div className="ticket-modal-scroll">
+                <div className="modal-ticket-header">
+                  <QrCode className="modal-ticket-icon" />
+                  <h3 className="modal-title">{text.digitalTicket}</h3>
+                  <p className="modal-subtitle">{text.presentTicket}</p>
+                </div>
+
+                <div className="modal-status-strip">
+                  <span className="modal-status-pill">{activeBooking.status}</span>
+                  <span className="modal-status-pill light">Booked on {format(new Date(activeBooking.booking_date), 'dd MMM yyyy')}</span>
+                </div>
+
+                <div className="modal-highlight-grid">
+                  <div className="modal-highlight-card">
+                    <span className="modal-highlight-label">{text.route}</span>
+                    <span className="modal-highlight-value">{activeBooking.source} → {activeBooking.destination}</span>
+                  </div>
+                  <div className="modal-highlight-card">
+                    <span className="modal-highlight-label">{text.journey}</span>
+                    <span className="modal-highlight-value">{formatTime(activeBooking.departure_time)} - {formatTime(activeBooking.arrival_time)}</span>
+                  </div>
+                  <div className="modal-highlight-card">
+                    <span className="modal-highlight-label">{text.seat}</span>
+                    <span className="modal-highlight-value">{formatSeat(activeBooking.seat_number)}</span>
+                  </div>
+                  <div className="modal-highlight-card accent">
+                    <span className="modal-highlight-label">{text.fare}</span>
+                    <span className="modal-highlight-value">₹{Number(activeBooking.fare || 0)}</span>
+                  </div>
+                </div>
+
+                <div className="modal-qr-container">
+                  <QRCodeSVG value={activeBooking.qr_code} size={180} />
+                  <div className="qr-id">{activeBooking.qr_code}</div>
+                </div>
+
+                <div className="ticket-divider"></div>
+
+                <div className="modal-ticket-details">
+                  <div className="detail-group">
+                    <h4 className="detail-group-title">{text.passenger}</h4>
+                    <div className="detail-row">
+                      <span className="detail-label">Name</span>
+                      <span className="detail-value">{activeBooking.passenger_name}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Age / Gender</span>
+                      <span className="detail-value">
+                        {activeBooking.passenger_age} yrs / {activeBooking.passenger_gender ? (activeBooking.passenger_gender.charAt(0).toUpperCase() + activeBooking.passenger_gender.slice(1)) : 'N/A'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="detail-group">
+                    <h4 className="detail-group-title">{text.bus}</h4>
+                    <div className="detail-row">
+                      <span className="detail-label">Operator</span>
+                      <span className="detail-value">{activeBooking.operator || 'N/A'}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Bus</span>
+                      <span className="detail-value">{activeBooking.bus_type || 'N/A'} ({activeBooking.bus_number || 'N/A'})</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Distance</span>
+                      <span className="detail-value">{Math.round(Number(activeBooking.distance_km || 0))} km</span>
+                    </div>
+                  </div>
+
+                  <div className="detail-group detail-group-full">
+                    <h4 className="detail-group-title">{text.ticketDetails}</h4>
+                    <div className="detail-row">
+                      <span className="detail-label">Ticket ID</span>
+                      <span className="detail-value mono">{activeBooking.qr_code}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Booking Reference</span>
+                      <span className="detail-value">BK-{activeBooking.id}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Departure</span>
+                      <span className="detail-value">{formatTime(activeBooking.departure_time)}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-label">Arrival</span>
+                      <span className="detail-value">{formatTime(activeBooking.arrival_time)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="modal-footer-text">Show this QR code to the conductor during boarding.</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {cancellingId && (
+          <div className="modal-overlay">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="confirm-modal"
+            >
+              <div className="modal-icon-wrapper warning">
+                <AlertTriangle className="modal-warning-icon" />
+              </div>
+              <h3 className="modal-title">{text.cancelBooking}</h3>
+              <p className="modal-text">{text.cancelWarn}</p>
+              <div className="modal-actions-horizontal">
+                <button 
+                  onClick={() => setCancellingId(null)}
+                  disabled={isProcessing}
+                  className="modal-btn-cancel"
+                >
+                  {text.keep}
+                </button>
+                <button 
+                  onClick={handleCancel}
+                  disabled={isProcessing}
+                  className="modal-btn-confirm"
+                >
+                  {isProcessing ? text.cancelling : text.yesCancel}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <div className="bookings-list">
+        {loading ? (
+          <div className="loading-state">{text.loading}</div>
+        ) : bookings.length > 0 ? (
+          bookings.map((b) => (
+            <div 
+              key={b.id} 
+              className={`booking-card ${b.status === 'confirmed' ? 'clickable' : ''}`}
+              onClick={() => b.status === 'confirmed' && setSelectedBooking(b)}
+            >
+              <div className="booking-info">
+                <div className="ticket-icon-wrapper">
+                  <Ticket className="ticket-icon" />
+                </div>
+                <div className="route-details">
+                  <div className="route-text">{b.source} → {b.destination}</div>
+                  <div className="date-text">{format(new Date(b.booking_date), 'PPP')}</div>
+                  <div className="passenger-mini-info">
+                    {b.passenger_name} ({b.passenger_age}, {b.passenger_gender})
+                  </div>
+                </div>
+              </div>
+              <div className="card-right-section">
+                <div className="status-section">
+                  <div className="status-label">{text.status}</div>
+                  <div className={`status-badge ${b.status}`}>
+                    {b.status.toUpperCase()}
+                  </div>
+                </div>
+                {b.status === 'confirmed' && (
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCancellingId(b.id);
+                    }}
+                    className="cancel-booking-btn"
+                    title="Cancel Booking"
+                  >
+                    <XCircle size={18} />
+                    <span>{text.cancel}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="empty-state">
+            <p className="empty-text">{text.noBookings}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
