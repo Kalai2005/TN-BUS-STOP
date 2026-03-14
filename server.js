@@ -180,7 +180,7 @@ if (routeCount.count === 0) {
   insertSchedule.run(10, "14:00", "15:00", 45, "Thanjavur", "Kumbakonam");
 }
 
-// Migration: Add new local routes and schedules if they don't exist
+
 const addLocalData = () => {
   const oldLocalRoutes = [
     ["Chennai", "Tambaram"],
@@ -272,7 +272,7 @@ const addLocalData = () => {
     clearOldLocalRoute.run(source, destination);
   });
 
-  // Remove any previously generated Salem-Erode local combinations before re-seeding.
+ 
   localStopNames.forEach(source => {
     localStopNames.forEach(destination => {
       if (source === destination) return;
@@ -282,7 +282,7 @@ const addLocalData = () => {
     });
   });
 
-  // Remove legacy label so only 'Erode' is shown.
+  
   ["Erode bus stand"].forEach((legacyStop) => {
     clearLegacyStopBookings.run(legacyStop, legacyStop);
     clearLegacyStopSchedules.run(legacyStop, legacyStop);
@@ -349,7 +349,7 @@ const addLocalData = () => {
         source.time
       );
 
-      // Reverse direction schedules: Erode side back toward Salem.
+     
       insertRoute.run(destination.name, source.name, routeDistance);
       insertSchedule.run(
         localBus.id,
@@ -367,7 +367,7 @@ const addLocalData = () => {
 
 addLocalData();
 
-// Migration: Add extra major city routes for richer location suggestions/search.
+
 const addMajorCityData = () => {
   const extraRoutes = [
     ['Chennai', 'Salem', 345],
@@ -461,7 +461,7 @@ const addMajorCitySchedules = () => {
 addMajorCitySchedules();
 
 const assignLocalBusesToShortRoutes = () => {
-  // Find all routes with distance < 80 km and assign local buses to them
+  
   const shortRoutes = db.prepare(`
     SELECT id, source, destination, distance_km
     FROM routes
@@ -470,7 +470,7 @@ const assignLocalBusesToShortRoutes = () => {
 
   if (shortRoutes.length === 0) return;
 
-  // Get available local buses
+  
   const localBuses = db.prepare(`
     SELECT id, bus_number FROM buses WHERE bus_type LIKE '%Local%'
   `).all();
@@ -488,12 +488,12 @@ const assignLocalBusesToShortRoutes = () => {
   `);
 
   shortRoutes.forEach((route) => {
-    // Calculate time and fare based on distance
-    const durationMinutes = Math.ceil(route.distance_km / 30); // ~30 km/h average
+    
+    const durationMinutes = Math.ceil(route.distance_km / 30); 
     const fare = Math.max(6, Math.round(route.distance_km * 0.9));
 
-    // Generate base departure time (cycle through morning, afternoon, evening)
-    const hours = [7, 10, 14, 18]; // 7am, 10am, 2pm, 6pm
+   
+    const hours = [7, 10, 14, 18]; 
     const baseHour = hours[busIndex % hours.length];
     const departureTime = `${String(baseHour).padStart(2, '0')}:00`;
     const arrivalHour = baseHour + Math.floor(durationMinutes / 60);
@@ -518,7 +518,7 @@ const assignLocalBusesToShortRoutes = () => {
 
 assignLocalBusesToShortRoutes();
 
-// Ensure default user exists
+
 const userCount = db.prepare("SELECT count(*) as count FROM users WHERE id = 1").get();
 if (userCount.count === 0) {
   const insertUser = db.prepare("INSERT INTO users (id, email, name, role) VALUES (?, ?, ?, ?)");
@@ -531,7 +531,7 @@ async function startServer() {
 
   app.use(express.json());
 
-  // API Routes
+  
   app.get("/api/locations", (req, res) => {
     const sources = db.prepare("SELECT DISTINCT source FROM routes").all().map(r => r.source);
     const destinations = db.prepare("SELECT DISTINCT destination FROM routes").all().map(r => r.destination);
@@ -667,7 +667,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Admin Routes
+  
   app.get("/api/admin/stats", (req, res) => {
     const stats = {
       totalBuses: db.prepare("SELECT count(*) as count FROM buses").get(),
@@ -677,7 +677,7 @@ async function startServer() {
     res.json(stats);
   });
 
-  // Vite middleware for development
+  
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

@@ -41,7 +41,7 @@ export const About = () => {
         </motion.div>
 
         <div className="about-card-stack">
-          {/* About Us Section */}
+          
           <motion.section 
             initial={{ opacity: 0, x: -20 }}
             whileInView={{ opacity: 1, x: 0 }}
@@ -68,7 +68,7 @@ export const About = () => {
             </div>
           </motion.section>
 
-          {/* Terms of Service Section */}
+          
           <motion.section 
             initial={{ opacity: 0, x: 20 }}
             whileInView={{ opacity: 1, x: 0 }}
@@ -95,7 +95,7 @@ export const About = () => {
             </div>
           </motion.section>
 
-          {/* Privacy Policy Section */}
+          
           <motion.section 
             initial={{ opacity: 0, x: -20 }}
             whileInView={{ opacity: 1, x: 0 }}

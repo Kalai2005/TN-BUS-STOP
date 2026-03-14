@@ -198,7 +198,7 @@ export const Booking = () => {
     loadBookingData();
   }, [id, text.invalidSchedule, text.unableLoadDetails, text.seatNotRequired, text.chooseSeat, text.loadFailed]);
 
-  // Simulated waiting list seats (visual guidance only)
+
   const waitingListSeats = ['A4', 'C3'];
 
   const totalSeats = busDetails?.capacity || 40;
@@ -273,7 +273,7 @@ export const Booking = () => {
 
     try {
       if (!isLocalBus) {
-        // Final availability check right before booking to avoid stale seat selection.
+        
         const latestSeatData = await api.getBookedSeats(id);
         const latestBookedSeats = Array.isArray(latestSeatData?.bookedSeats)
           ? latestSeatData.bookedSeats
@@ -304,7 +304,7 @@ export const Booking = () => {
       setBooked(true);
       setShowSuccessModal(true);
 
-      // Mark the just-booked seat immediately in UI.
+      
       if (!isLocalBus && selectedSeat) {
         setBookedSeats((prev) => [...new Set([...prev, selectedSeat])]);
       }
