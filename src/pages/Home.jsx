@@ -13,6 +13,7 @@ export const Home = () => {
     ? {
         localModeError: 'உள்ளூர் பஸ் தேடல் செயலில் உள்ளது: உங்கள் உள்ளூர் தொடக்கம் மற்றும் இலக்கை உள்ளிடவும்.',
         samePlaceError: 'தொடக்கம் மற்றும் இலக்கு ஒரே மாதிரி இருக்கக்கூடாது',
+      destinationRequired: 'இருக்கும் பஸ்களை காண இலக்கை தேர்வு செய்யவும்.',
         heroTop: 'தமிழ்நாடு முழுவதும் பயணம் செய்யுங்கள்',
         heroBottom: 'நம்பிக்கையுடன்',
         accentState: 'தமிழ்நாடு',
@@ -25,9 +26,12 @@ export const Home = () => {
         noCities: 'நகரங்கள் கிடைக்கவில்லை',
         searching: 'தேடுகிறது...',
         searchBuses: 'பஸ்களை தேடுங்கள்',
+        showDestinationBuses: 'இலக்குக்கான பஸ்கள்',
         aiTip: 'AI பயண குறிப்பு',
         busesFound: 'பஸ்கள் கண்டுபிடிக்கப்பட்டன',
+        destinationViewPrefix: 'இலக்கிற்கு கிடைக்கும் பஸ்கள்',
         availability: 'நேரடி கிடைக்கும் நிலை',
+        nextDayArrival: 'அடுத்த நாள் வருகை',
         localBus: 'உள்ளூர் பஸ்',
         intercity: 'இடநகர்',
         regional: 'பிராந்திய',
@@ -46,6 +50,7 @@ export const Home = () => {
     : {
         localModeError: 'Local Bus Search Active: Please enter your local source and destination.',
         samePlaceError: 'Source and Destination cannot be same',
+      destinationRequired: 'Please select a destination to view available buses.',
         heroTop: 'Travel Across',
         heroBottom: 'with Confidence',
         accentState: 'Tamil Nadu',
@@ -58,9 +63,12 @@ export const Home = () => {
         noCities: 'No cities found',
         searching: 'Searching...',
         searchBuses: 'Search Buses',
+        showDestinationBuses: 'Buses To Destination',
         aiTip: 'AI Travel Tip',
         busesFound: 'Buses Found for',
+        destinationViewPrefix: 'Available buses to',
         availability: 'Real-time availability',
+        nextDayArrival: 'Next day arrival',
         localBus: 'Local Bus',
         intercity: 'Intercity',
         regional: 'Regional',
@@ -90,6 +98,55 @@ export const Home = () => {
   const [advice, setAdvice] = useState('');
   const [error, setError] = useState('');
 
+  const formatTime = (value) => {
+    if (!value) return 'N/A';
+
+    const [hours, minutes] = String(value).split(':');
+    if (hours === undefined || minutes === undefined) return value;
+
+    const hourNumber = Number(hours);
+    if (Number.isNaN(hourNumber)) return value;
+
+    const meridiem = hourNumber >= 12 ? 'PM' : 'AM';
+    const formattedHour = hourNumber % 12 || 12;
+    return `${formattedHour}:${minutes} ${meridiem}`;
+  };
+
+  const getTimeInMinutes = (value) => {
+    if (!value) return null;
+
+    const [hours, minutes] = String(value).split(':').map(Number);
+    if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+
+    return (hours * 60) + minutes;
+  };
+
+  const getJourneyMeta = (departure, arrival) => {
+    const departureMinutes = getTimeInMinutes(departure);
+    const arrivalMinutesRaw = getTimeInMinutes(arrival);
+
+    if (departureMinutes === null || arrivalMinutesRaw === null) {
+      return { durationLabel: 'N/A', dayOffset: 0 };
+    }
+
+    let arrivalMinutes = arrivalMinutesRaw;
+    let dayOffset = 0;
+
+    while (arrivalMinutes < departureMinutes) {
+      arrivalMinutes += 24 * 60;
+      dayOffset += 1;
+    }
+
+    const durationMinutes = arrivalMinutes - departureMinutes;
+    const hours = Math.floor(durationMinutes / 60);
+    const minutes = durationMinutes % 60;
+
+    return {
+      durationLabel: `${hours}h ${minutes}m`,
+      dayOffset,
+    };
+  };
+
   React.useEffect(() => {
     const fetchLocations = async () => {
       try {
@@ -109,17 +166,25 @@ export const Home = () => {
     }
   }, [location.search, text.localModeError]);
 
-  const handleSearch = async (e) => {
-    e.preventDefault();
+  const runSearch = async ({ sourceValue, destinationValue }) => {
+    if (!destinationValue.trim()) {
+      setError(text.destinationRequired);
+      return;
+    }
+
     setError('');
-    if (source === destination) {
+
+    if (sourceValue.trim() && sourceValue === destinationValue) {
       setError(text.samePlaceError);
       return;
     }
+
     setLoading(true);
+    setSearched(false);
     setAdvice('');
+
     try {
-      const res = await fetch(`/api/search?source=${source}&destination=${destination}`);
+      const res = await fetch(`/api/search?source=${encodeURIComponent(sourceValue)}&destination=${encodeURIComponent(destinationValue)}`);
       const data = await res.json();
       setResults(data);
       setSearched(true);
@@ -128,7 +193,7 @@ export const Home = () => {
       const adviceRes = await fetch('/api/advice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, destination })
+        body: JSON.stringify({ source: sourceValue || 'Any', destination: destinationValue })
       });
       const adviceData = await adviceRes.json();
       setAdvice(adviceData.advice);
@@ -137,6 +202,15 @@ export const Home = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    await runSearch({ sourceValue: source, destinationValue: destination });
+  };
+
+  const handleDestinationAvailability = async () => {
+    await runSearch({ sourceValue: '', destinationValue: destination });
   };
 
   return (
@@ -302,6 +376,15 @@ export const Home = () => {
                 >
                   {loading ? text.searching : <><Search className="btn-icon" /> <span>{text.searchBuses}</span></>}
                 </button>
+                <button
+                  type="button"
+                  disabled={loading || !destination.trim()}
+                  className="destination-buses-btn"
+                  onClick={handleDestinationAvailability}
+                >
+                  <Bus className="btn-icon" />
+                  <span>{text.showDestinationBuses}</span>
+                </button>
               </div>
             </form>
           </motion.div>
@@ -331,7 +414,9 @@ export const Home = () => {
 
               <div className="results-header">
                 <h2 className="results-title">
-                  {results.length} {text.busesFound} {source} to {destination}
+                  {source.trim()
+                    ? `${results.length} ${text.busesFound} ${source} to ${destination}`
+                    : `${results.length} ${text.destinationViewPrefix} ${destination}`}
                 </h2>
                 <div className="results-meta">
                   <Clock className="meta-icon" />
@@ -343,72 +428,80 @@ export const Home = () => {
 
           <div className="bus-list">
             <AnimatePresence mode="popLayout">
-              {results.map((bus, idx) => (
-                <motion.div 
-                  key={bus.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: idx * 0.1 }}
-                  className="bus-card"
-                >
-                  <div className="bus-card-content">
-                    <div className="bus-info">
-                        <div className="bus-header">
-                          <div className="operator-group">
-                            <span className="operator-badge">
-                              {bus.operator}
-                            </span>
-                            {bus.distance_km < 100 ? (
-                              <span className="local-badge">{text.localBus}</span>
-                            ) : (
-                              <span className="long-distance-badge">
-                                {bus.operator === 'SETC' ? text.intercity : text.regional}
+              {results.map((bus, idx) => {
+                const journeyMeta = getJourneyMeta(bus.departure_time, bus.arrival_time);
+
+                return (
+                  <motion.div 
+                    key={bus.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: idx * 0.1 }}
+                    className="bus-card"
+                  >
+                    <div className="bus-card-content">
+                      <div className="bus-info">
+                          <div className="bus-header">
+                            <div className="operator-group">
+                              <span className="operator-badge">
+                                {bus.operator}
                               </span>
-                            )}
-                          </div>
-                          <span className="bus-number">{bus.bus_number}</span>
-                        </div>
-                        <div className="bus-route-info">
-                          <div 
-                            className="route-stop clickable-stop"
-                            onClick={() => setSource(bus.source)}
-                            title={text.setSource}
-                          >
-                            <div className="stop-time">{bus.departure_time}</div>
-                            <div className="stop-name">{bus.source}</div>
-                          </div>
-                          <div className="route-visual">
-                            <div className="visual-line">
-                              <div className="visual-icon-wrapper">
-                                <Bus className="visual-icon" />
-                              </div>
+                              {bus.distance_km < 100 ? (
+                                <span className="local-badge">{text.localBus}</span>
+                              ) : (
+                                <span className="long-distance-badge">
+                                  {bus.operator === 'SETC' ? text.intercity : text.regional}
+                                </span>
+                              )}
                             </div>
-                            <div className="visual-duration">{bus.distance_km} km</div>
+                            <span className="bus-number">{bus.bus_number}</span>
                           </div>
-                          <div 
-                            className="route-stop text-right clickable-stop"
-                            onClick={() => setDestination(bus.destination)}
-                            title={text.setDestination}
-                          >
-                            <div className="stop-time">{bus.arrival_time}</div>
-                            <div className="stop-name">{bus.destination}</div>
+                          <div className="bus-route-info">
+                            <div 
+                              className="route-stop clickable-stop"
+                              onClick={() => setSource(bus.source)}
+                              title={text.setSource}
+                            >
+                              <div className="stop-time">{formatTime(bus.departure_time)}</div>
+                              <div className="stop-name">{bus.source}</div>
+                            </div>
+                            <div className="route-visual">
+                              <div className="visual-line">
+                                <div className="visual-icon-wrapper">
+                                  <Bus className="visual-icon" />
+                                </div>
+                              </div>
+                              <div className="visual-duration">{journeyMeta.durationLabel}</div>
+                              <div className="visual-distance">{bus.distance_km} km</div>
+                            </div>
+                            <div 
+                              className="route-stop text-right clickable-stop"
+                              onClick={() => setDestination(bus.destination)}
+                              title={text.setDestination}
+                            >
+                              <div className="stop-time">{formatTime(bus.arrival_time)}</div>
+                              {journeyMeta.dayOffset > 0 && (
+                                <div className="stop-day-note">{text.nextDayArrival}</div>
+                              )}
+                              <div className="stop-name">{bus.destination}</div>
+                            </div>
                           </div>
-                        </div>
+                      </div>
+                      
+                      <div className="bus-actions">
+                        <div className="bus-type">{bus.bus_type}</div>
+                        <div className="bus-fare">₹{bus.fare}</div>
+                        <Link 
+                          to={`/book/${bus.id}`}
+                          className="select-btn"
+                        >
+                          {text.selectSeats}
+                        </Link>
+                      </div>
                     </div>
-                    
-                    <div className="bus-actions">
-                      <div className="bus-type">{bus.bus_type}</div>
-                      <div className="bus-fare">₹{bus.fare}</div>
-                      <Link 
-                        to={`/book/${bus.id}`}
-                        className="select-btn"
-                      >
-                        {text.selectSeats}
-                      </Link>
-                    </div>
-                  </div>
-                </motion.div>
-              ))}
+                  </motion.div>
+                );
+              })}
             </AnimatePresence>
 
             {searched && results.length === 0 && (

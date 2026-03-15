@@ -49,6 +49,7 @@ export const Booking = () => {
         baseFare: 'அடிப்படை கட்டணம்',
         serviceFee: 'சேவை கட்டணம்',
         totalAmount: 'மொத்த தொகை',
+        nextDayArrival: 'அடுத்த நாள் வருகை',
       }
     : {
         chooseSeat: 'Please choose an available seat to continue.',
@@ -89,6 +90,7 @@ export const Booking = () => {
         baseFare: 'Base Fare',
         serviceFee: 'Service Fee',
         totalAmount: 'Total Amount',
+        nextDayArrival: 'Next day arrival',
       };
   const { id } = useParams();
   const navigate = useNavigate();
@@ -134,6 +136,31 @@ export const Booking = () => {
       hour: '2-digit',
       minute: '2-digit'
     });
+  };
+
+  const getDayOffset = (departure, arrival) => {
+    const [departureHours, departureMinutes] = String(departure || '').split(':').map(Number);
+    const [arrivalHours, arrivalMinutes] = String(arrival || '').split(':').map(Number);
+
+    if (
+      Number.isNaN(departureHours) ||
+      Number.isNaN(departureMinutes) ||
+      Number.isNaN(arrivalHours) ||
+      Number.isNaN(arrivalMinutes)
+    ) {
+      return 0;
+    }
+
+    const departureTotal = (departureHours * 60) + departureMinutes;
+    let arrivalTotal = (arrivalHours * 60) + arrivalMinutes;
+    let dayOffset = 0;
+
+    while (arrivalTotal < departureTotal) {
+      arrivalTotal += 24 * 60;
+      dayOffset += 1;
+    }
+
+    return dayOffset;
   };
 
   useEffect(() => {
@@ -206,6 +233,7 @@ export const Booking = () => {
   const baseFare = Number(busDetails?.fare || 0);
   const serviceFee = isLocalBus ? 1 : 25;
   const totalAmount = baseFare + serviceFee;
+  const bookingDayOffset = getDayOffset(busDetails?.departureTime, busDetails?.arrivalTime);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -563,6 +591,9 @@ export const Booking = () => {
             <div className="highlight-item">
               <span className="highlight-label">Journey Time</span>
               <span className="highlight-value">{formatTime(busDetails.departureTime)} - {formatTime(busDetails.arrivalTime)}</span>
+              {bookingDayOffset > 0 && (
+                <span className="time-day-note">{text.nextDayArrival}</span>
+              )}
             </div>
             <div className="highlight-item">
               <span className="highlight-label">Seat</span>
@@ -628,6 +659,13 @@ export const Booking = () => {
               <div className="info-row">
                 <span className="info-label">Boarding Time</span>
                 <span className="info-value">{formatTime(busDetails.departureTime)}</span>
+              </div>
+              <div className="info-row">
+                <span className="info-label">Arrival Time</span>
+                <span className="info-value with-note">
+                  <span>{formatTime(busDetails.arrivalTime)}</span>
+                  {bookingDayOffset > 0 && <span className="time-day-note">{text.nextDayArrival}</span>}
+                </span>
               </div>
             </div>
           </div>

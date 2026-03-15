@@ -32,6 +32,36 @@ const normalizeCity = (value = '') => {
   return CITY_ALIASES[key] || value;
 };
 
+const CANONICAL_LOCAL_BUS_NUMBER = "TN-30-L-7015";
+
+const toHHMM = (totalMinutes) => {
+  const normalizedMinutes = ((totalMinutes % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const hours = Math.floor(normalizedMinutes / 60);
+  const minutes = normalizedMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+};
+
+const listenWithPortFallback = (app, startPort, host = "0.0.0.0", maxRetries = 10) =>
+  new Promise((resolve, reject) => {
+    const tryListen = (port, retriesLeft) => {
+      const server = app.listen(port, host, () => {
+        resolve({ server, port });
+      });
+
+      server.once("error", (error) => {
+        if (error.code === "EADDRINUSE" && retriesLeft > 0) {
+          console.warn(`Port ${port} is in use. Trying port ${port + 1}...`);
+          tryListen(port + 1, retriesLeft - 1);
+          return;
+        }
+
+        reject(error);
+      });
+    };
+
+    tryListen(startPort, maxRetries);
+  });
+
 // Initialize Database
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -291,11 +321,10 @@ const addLocalData = () => {
 
   const insertRoute = db.prepare("INSERT OR IGNORE INTO routes (source, destination, distance_km) VALUES (?, ?, ?)");
 
-  const localBusNumber = "TN-30-L-7015";
   db.prepare("INSERT OR IGNORE INTO buses (bus_number, bus_type, capacity, operator) VALUES (?, ?, ?, ?)")
-    .run(localBusNumber, "Local Non-AC", 55, "TNSTC");
+    .run(CANONICAL_LOCAL_BUS_NUMBER, "Local Non-AC", 55, "TNSTC");
 
-  const localBus = db.prepare("SELECT id FROM buses WHERE bus_number = ?").get(localBusNumber);
+  const localBus = db.prepare("SELECT id FROM buses WHERE bus_number = ?").get(CANONICAL_LOCAL_BUS_NUMBER);
   if (!localBus) return;
 
   const insertSchedule = db.prepare(`
@@ -312,12 +341,6 @@ const addLocalData = () => {
   const toMinutes = (hhmm) => {
     const [hh, mm] = hhmm.split(":").map(Number);
     return (hh * 60) + mm;
-  };
-
-  const toHHMM = (totalMinutes) => {
-    const h = Math.floor(totalMinutes / 60);
-    const m = totalMinutes % 60;
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   };
 
   const forwardStartMinutes = toMinutes(localStopTimeline[0].time);
@@ -471,9 +494,26 @@ const assignLocalBusesToShortRoutes = () => {
   if (shortRoutes.length === 0) return;
 
   
+  db.prepare(`
+    DELETE FROM schedules
+    WHERE id IN (
+      SELECT s.id
+      FROM schedules s
+      JOIN routes r ON r.id = s.route_id
+      JOIN buses b ON b.id = s.bus_id
+      WHERE r.distance_km < 80
+        AND b.bus_type LIKE '%Local%'
+        AND b.bus_number != ?
+    )
+  `).run(CANONICAL_LOCAL_BUS_NUMBER);
+
   const localBuses = db.prepare(`
-    SELECT id, bus_number FROM buses WHERE bus_type LIKE '%Local%'
-  `).all();
+    SELECT id, bus_number
+    FROM buses
+    WHERE bus_type LIKE '%Local%'
+      AND bus_number != ?
+    ORDER BY bus_number ASC
+  `).all(CANONICAL_LOCAL_BUS_NUMBER);
 
   if (localBuses.length === 0) return;
 
@@ -489,16 +529,16 @@ const assignLocalBusesToShortRoutes = () => {
 
   shortRoutes.forEach((route) => {
     
-    const durationMinutes = Math.ceil(route.distance_km / 30); 
+    const durationMinutes = Math.max(10, Math.ceil((route.distance_km / 30) * 60));
     const fare = Math.max(6, Math.round(route.distance_km * 0.9));
 
-   
-    const hours = [7, 10, 14, 18]; 
-    const baseHour = hours[busIndex % hours.length];
-    const departureTime = `${String(baseHour).padStart(2, '0')}:00`;
-    const arrivalHour = baseHour + Math.floor(durationMinutes / 60);
-    const arrivalMinute = durationMinutes % 60;
-    const arrivalTime = `${String(arrivalHour).padStart(2, '0')}:${String(arrivalMinute).padStart(2, '0')}`;
+    const departureSlots = [7 * 60, 10 * 60, 14 * 60, 18 * 60];
+    const baseDepartureMinutes = departureSlots[busIndex % departureSlots.length];
+    const staggerMinutes = (Math.floor(busIndex / departureSlots.length) % 3) * 20;
+    const departureMinutes = baseDepartureMinutes + staggerMinutes;
+    const arrivalMinutes = departureMinutes + durationMinutes;
+    const departureTime = toHHMM(departureMinutes % (24 * 60));
+    const arrivalTime = toHHMM(arrivalMinutes % (24 * 60));
 
     // Cycle through local buses
     const localBus = localBuses[busIndex % localBuses.length];
@@ -527,7 +567,8 @@ if (userCount.count === 0) {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+  const HMR_PORT = Number(process.env.VITE_HMR_PORT) || 24679;
 
   app.use(express.json());
 
@@ -556,6 +597,7 @@ async function startServer() {
       JOIN buses b ON s.bus_id = b.id
       JOIN routes r ON s.route_id = r.id
       WHERE r.source LIKE ? AND r.destination LIKE ?
+      ORDER BY s.departure_time ASC
     `;
     const results = db.prepare(query).all(`%${source}%`, `%${destination}%`);
     res.json(results);
@@ -680,7 +722,10 @@ async function startServer() {
   
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: { port: HMR_PORT },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -691,9 +736,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  const { port: activePort } = await listenWithPortFallback(app, PORT, "0.0.0.0", 10);
+  console.log(`Server running on http://localhost:${activePort}`);
 }
 
 startServer();

@@ -31,6 +31,7 @@ export const MyBookings = () => {
         keep: 'இல்லை, வைத்திருக்கவும்',
         yesCancel: 'ஆம், ரத்து செய்',
         cancelling: 'ரத்து செய்கிறது...',
+        nextDayArrival: 'அடுத்த நாள் வருகை',
       }
     : {
         pageTitle: 'My Travel History',
@@ -53,6 +54,7 @@ export const MyBookings = () => {
         keep: 'No, Keep it',
         yesCancel: 'Yes, Cancel',
         cancelling: 'Cancelling...',
+        nextDayArrival: 'Next day arrival',
       };
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -77,6 +79,31 @@ export const MyBookings = () => {
   const formatSeat = (seatNumber) => {
     if (!seatNumber || seatNumber === 'N/A') return text.allocatedBoarding;
     return seatNumber;
+  };
+
+  const getDayOffset = (departure, arrival) => {
+    const [departureHours, departureMinutes] = String(departure || '').split(':').map(Number);
+    const [arrivalHours, arrivalMinutes] = String(arrival || '').split(':').map(Number);
+
+    if (
+      Number.isNaN(departureHours) ||
+      Number.isNaN(departureMinutes) ||
+      Number.isNaN(arrivalHours) ||
+      Number.isNaN(arrivalMinutes)
+    ) {
+      return 0;
+    }
+
+    const departureTotal = (departureHours * 60) + departureMinutes;
+    let arrivalTotal = (arrivalHours * 60) + arrivalMinutes;
+    let dayOffset = 0;
+
+    while (arrivalTotal < departureTotal) {
+      arrivalTotal += 24 * 60;
+      dayOffset += 1;
+    }
+
+    return dayOffset;
   };
 
   useEffect(() => {
@@ -130,6 +157,10 @@ export const MyBookings = () => {
         destination: selectedSchedule?.destination ?? selectedBooking.destination,
       }
     : null;
+
+  const bookingDayOffset = activeBooking
+    ? getDayOffset(activeBooking.departure_time, activeBooking.arrival_time)
+    : 0;
 
   const handleCancel = async () => {
     if (!cancellingId) return;
@@ -189,6 +220,9 @@ export const MyBookings = () => {
                   <div className="modal-highlight-card">
                     <span className="modal-highlight-label">{text.journey}</span>
                     <span className="modal-highlight-value">{formatTime(activeBooking.departure_time)} - {formatTime(activeBooking.arrival_time)}</span>
+                    {bookingDayOffset > 0 && (
+                      <span className="time-day-note">{text.nextDayArrival}</span>
+                    )}
                   </div>
                   <div className="modal-highlight-card">
                     <span className="modal-highlight-label">{text.seat}</span>
@@ -254,7 +288,10 @@ export const MyBookings = () => {
                     </div>
                     <div className="detail-row">
                       <span className="detail-label">Arrival</span>
-                      <span className="detail-value">{formatTime(activeBooking.arrival_time)}</span>
+                      <span className="detail-value with-note">
+                        <span>{formatTime(activeBooking.arrival_time)}</span>
+                        {bookingDayOffset > 0 && <span className="time-day-note">{text.nextDayArrival}</span>}
+                      </span>
                     </div>
                   </div>
                 </div>
