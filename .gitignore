@@ -8,3 +8,4 @@ coverage/
 *.db-journal
 .env*
 !.env.example
+Firebase credentials.json

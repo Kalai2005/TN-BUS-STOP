@@ -1,9 +1,11 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getTravelAdvice } from "./src/services/geminiService.js";
+import { getTravelAdvice } from "./src/Backend/geminiService.js";
+import { createFirestoreStore } from "./src/Backend/firestoreStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const db = new Database("bus_system.db");
@@ -39,6 +41,48 @@ const toHHMM = (totalMinutes) => {
   const hours = Math.floor(normalizedMinutes / 60);
   const minutes = normalizedMinutes % 60;
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+};
+
+const parseStopEntry = (entry) => {
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    const stopName = String(entry.stop_name || entry.name || "").trim();
+    const stopTime = String(entry.stop_time || entry.time || "").trim();
+    if (!stopName) return null;
+    return {
+      stop_name: stopName,
+      stop_time: stopTime || null,
+    };
+  }
+
+  const raw = String(entry || "").trim();
+  if (!raw) return null;
+
+  const [namePart, timePart] = raw.split("|").map((part) => String(part || "").trim());
+  if (!namePart) return null;
+
+  return {
+    stop_name: namePart,
+    stop_time: timePart || null,
+  };
+};
+
+const parseStopsInput = (stops) => {
+  if (Array.isArray(stops)) {
+    return stops
+      .map(parseStopEntry)
+      .filter(Boolean)
+      .map((stop, index) => ({ ...stop, stop_order: index + 1 }));
+  }
+
+  const normalizedStops = String(stops || "")
+    .replace(/\\n/g, "\n")
+    .replace(/`n/g, "\n");
+
+  return normalizedStops
+    .split(/[\n,]/)
+    .map(parseStopEntry)
+    .filter(Boolean)
+    .map((stop, index) => ({ ...stop, stop_order: index + 1 }));
 };
 
 const listenWithPortFallback = (app, startPort, host = "0.0.0.0", maxRetries = 10) =>
@@ -94,6 +138,15 @@ db.exec(`
     arrival_time TEXT,
     fare REAL,
     FOREIGN KEY(bus_id) REFERENCES buses(id),
+    FOREIGN KEY(route_id) REFERENCES routes(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS route_stops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_id INTEGER,
+    stop_name TEXT,
+    stop_order INTEGER,
+    stop_time TEXT,
     FOREIGN KEY(route_id) REFERENCES routes(id)
   );
 
@@ -569,11 +622,20 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
   const HMR_PORT = Number(process.env.VITE_HMR_PORT) || 24679;
+  const firestoreStore = await createFirestoreStore(db);
 
   app.use(express.json());
 
+  console.log(`Data mode: ${firestoreStore.mode}. ${firestoreStore.reason}`);
+
   
-  app.get("/api/locations", (req, res) => {
+  app.get("/api/locations", async (req, res) => {
+    if (firestoreStore.enabled) {
+      const locations = await firestoreStore.getLocations();
+      res.json(locations);
+      return;
+    }
+
     const sources = db.prepare("SELECT DISTINCT source FROM routes").all().map(r => r.source);
     const destinations = db.prepare("SELECT DISTINCT destination FROM routes").all().map(r => r.destination);
     const allLocations = [...new Set([...sources, ...destinations])];
@@ -586,11 +648,18 @@ async function startServer() {
     res.json({ advice });
   });
 
-  app.get("/api/search", (req, res) => {
+  app.get("/api/search", async (req, res) => {
     const rawSource = String(req.query.source || '');
     const rawDestination = String(req.query.destination || '');
     const source = normalizeCity(rawSource);
     const destination = normalizeCity(rawDestination);
+
+    if (firestoreStore.enabled) {
+      const results = await firestoreStore.search(source, destination);
+      res.json(results);
+      return;
+    }
+
     const query = `
       SELECT s.*, b.bus_number, b.bus_type, b.operator, r.source, r.destination, r.distance_km
       FROM schedules s
@@ -603,8 +672,21 @@ async function startServer() {
     res.json(results);
   });
 
-  app.get("/api/schedules/:id", (req, res) => {
+  app.get("/api/schedules/:id", async (req, res) => {
     const { id } = req.params;
+
+    if (firestoreStore.enabled) {
+      const schedule = await firestoreStore.getScheduleById(id);
+
+      if (!schedule) {
+        res.status(404).json({ success: false, message: "Schedule not found" });
+        return;
+      }
+
+      res.json(schedule);
+      return;
+    }
+
     const query = `
       SELECT s.id, s.departure_time, s.arrival_time, s.fare,
              b.bus_number, b.bus_type, b.operator, b.capacity,
@@ -625,8 +707,15 @@ async function startServer() {
     res.json(schedule);
   });
 
-  app.get("/api/schedules/:id/seats", (req, res) => {
+  app.get("/api/schedules/:id/seats", async (req, res) => {
     const { id } = req.params;
+
+    if (firestoreStore.enabled) {
+      const seats = await firestoreStore.getBookedSeats(id);
+      res.json({ schedule_id: Number(id), bookedSeats: seats });
+      return;
+    }
+
     const seats = db
       .prepare(
         "SELECT seat_number FROM bookings WHERE schedule_id = ? AND status = 'confirmed'"
@@ -637,11 +726,62 @@ async function startServer() {
     res.json({ schedule_id: Number(id), bookedSeats: seats });
   });
 
-  app.post("/api/bookings", (req, res) => {
+  app.get("/api/schedules/:id/stops", async (req, res) => {
+    const { id } = req.params;
+
+    if (firestoreStore.enabled) {
+      const result = await firestoreStore.getScheduleStops(id);
+      if (!result.found) {
+        res.status(404).json({ success: false, message: "Schedule not found", stops: [] });
+        return;
+      }
+      res.json({ success: true, schedule_id: Number(id), stops: result.stops });
+      return;
+    }
+
+    const schedule = db.prepare("SELECT route_id FROM schedules WHERE id = ? LIMIT 1").get(id);
+    if (!schedule) {
+      res.status(404).json({ success: false, message: "Schedule not found", stops: [] });
+      return;
+    }
+
+    const stops = db.prepare(`
+      SELECT id, stop_name, stop_time, stop_order
+      FROM route_stops
+      WHERE route_id = ?
+      ORDER BY stop_order ASC, id ASC
+    `).all(schedule.route_id);
+
+    res.json({ success: true, schedule_id: Number(id), stops });
+  });
+
+  app.post("/api/bookings", async (req, res) => {
     const { user_id, schedule_id, seat_number, passenger_name, passenger_age, passenger_gender } = req.body;
 
     if (!schedule_id || !passenger_name || !passenger_age || !passenger_gender) {
       res.status(400).json({ success: false, message: "Missing required booking fields" });
+      return;
+    }
+
+    if (firestoreStore.enabled) {
+      const bookingResult = await firestoreStore.createBooking({
+        user_id,
+        schedule_id,
+        seat_number,
+        passenger_name,
+        passenger_age,
+        passenger_gender,
+      });
+
+      if (!bookingResult.success) {
+        res.status(bookingResult.statusCode || 400).json({
+          success: false,
+          message: bookingResult.message || "Booking failed",
+        });
+        return;
+      }
+
+      res.json(bookingResult);
       return;
     }
 
@@ -687,7 +827,13 @@ async function startServer() {
     res.json({ success: true, bookingId: info.lastInsertRowid, qr_code });
   });
 
-  app.get("/api/user/bookings/:userId", (req, res) => {
+  app.get("/api/user/bookings/:userId", async (req, res) => {
+    if (firestoreStore.enabled) {
+      const results = await firestoreStore.getUserBookings(req.params.userId);
+      res.json(results);
+      return;
+    }
+
     const query = `
         SELECT bk.*, s.departure_time, s.arrival_time, s.fare, r.source, r.destination, r.distance_km,
           b.bus_number, b.bus_type, b.operator,
@@ -702,21 +848,189 @@ async function startServer() {
     res.json(results);
   });
 
-  app.patch("/api/bookings/:id", (req, res) => {
+  app.patch("/api/bookings/:id", async (req, res) => {
     const { status } = req.body;
     const { id } = req.params;
+
+    if (firestoreStore.enabled) {
+      const result = await firestoreStore.updateBookingStatus(id, status);
+      if (!result.found) {
+        res.status(404).json({ success: false, message: "Booking not found" });
+        return;
+      }
+      res.json({ success: true });
+      return;
+    }
+
     db.prepare("UPDATE bookings SET status = ? WHERE id = ?").run(status, id);
     res.json({ success: true });
   });
 
   
-  app.get("/api/admin/stats", (req, res) => {
+  app.get("/api/admin/stats", async (req, res) => {
+    if (firestoreStore.enabled) {
+      const stats = await firestoreStore.getAdminStats();
+      res.json(stats);
+      return;
+    }
+
     const stats = {
       totalBuses: db.prepare("SELECT count(*) as count FROM buses").get(),
       totalBookings: db.prepare("SELECT count(*) as count FROM bookings").get(),
       revenue: db.prepare("SELECT sum(s.fare) as total FROM bookings bk JOIN schedules s ON bk.schedule_id = s.id").get()
     };
     res.json(stats);
+  });
+
+  app.get("/api/admin/schedules", async (req, res) => {
+    const limit = Number(req.query.limit) || 25;
+
+    if (firestoreStore.enabled) {
+      const schedules = await firestoreStore.getAdminSchedules(limit);
+      res.json(schedules);
+      return;
+    }
+
+    const schedules = db.prepare(`
+      SELECT s.id, s.departure_time, s.arrival_time, s.fare,
+             b.bus_number, b.bus_type, b.operator, b.capacity,
+             r.id AS route_id, r.source, r.destination, r.distance_km,
+             (SELECT count(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stops_count
+      FROM schedules s
+      JOIN buses b ON s.bus_id = b.id
+      JOIN routes r ON s.route_id = r.id
+      ORDER BY s.id DESC
+      LIMIT ?
+    `).all(limit);
+
+    res.json(schedules);
+  });
+
+  app.post("/api/admin/buses", async (req, res) => {
+    const {
+      bus_number,
+      bus_type,
+      operator,
+      capacity,
+      source,
+      destination,
+      distance_km,
+      departure_time,
+      arrival_time,
+      fare,
+      stops,
+    } = req.body || {};
+
+    const busNumber = String(bus_number || "").trim();
+    const busType = String(bus_type || "").trim();
+    const busOperator = String(operator || "").trim();
+    const sourceCity = String(source || "").trim();
+    const destinationCity = String(destination || "").trim();
+    const departureTime = String(departure_time || "").trim();
+    const arrivalTime = String(arrival_time || "").trim();
+    const parsedCapacity = Math.max(1, Number(capacity) || 40);
+    const parsedDistance = Math.max(0, Number(distance_km) || 0);
+    const parsedFare = Math.max(0, Number(fare) || 0);
+    const stopList = parseStopsInput(stops);
+
+    if (!busNumber || !busType || !busOperator || !sourceCity || !destinationCity || !departureTime || !arrivalTime) {
+      res.status(400).json({ success: false, message: "Missing required fields" });
+      return;
+    }
+
+    if (firestoreStore.enabled) {
+      const result = await firestoreStore.createAdminSchedule({
+        bus_number: busNumber,
+        bus_type: busType,
+        operator: busOperator,
+        capacity: parsedCapacity,
+        source: sourceCity,
+        destination: destinationCity,
+        distance_km: parsedDistance,
+        departure_time: departureTime,
+        arrival_time: arrivalTime,
+        fare: parsedFare,
+        stops,
+      });
+
+      if (!result.success) {
+        res.status(result.statusCode || 400).json(result);
+        return;
+      }
+
+      res.status(201).json(result);
+      return;
+    }
+
+    const createSchedule = db.transaction(() => {
+      let bus = db.prepare("SELECT id FROM buses WHERE bus_number = ?").get(busNumber);
+      if (!bus) {
+        const busInsert = db
+          .prepare("INSERT INTO buses (bus_number, bus_type, capacity, operator) VALUES (?, ?, ?, ?)")
+          .run(busNumber, busType, parsedCapacity, busOperator);
+        bus = { id: Number(busInsert.lastInsertRowid) };
+      } else {
+        db.prepare("UPDATE buses SET bus_type = ?, capacity = ?, operator = ? WHERE id = ?")
+          .run(busType, parsedCapacity, busOperator, bus.id);
+      }
+
+      let route = db.prepare("SELECT id FROM routes WHERE source = ? AND destination = ? LIMIT 1").get(sourceCity, destinationCity);
+      if (!route) {
+        const routeInsert = db
+          .prepare("INSERT INTO routes (source, destination, distance_km) VALUES (?, ?, ?)")
+          .run(sourceCity, destinationCity, parsedDistance);
+        route = { id: Number(routeInsert.lastInsertRowid) };
+      } else {
+        db.prepare("UPDATE routes SET distance_km = ? WHERE id = ?").run(parsedDistance, route.id);
+      }
+
+      const existingSchedule = db.prepare(`
+        SELECT s.id
+        FROM schedules s
+        WHERE s.bus_id = ? AND s.route_id = ? AND s.departure_time = ?
+        LIMIT 1
+      `).get(bus.id, route.id, departureTime);
+
+      if (existingSchedule) {
+        return { duplicate: true };
+      }
+
+      const scheduleInsert = db
+        .prepare("INSERT INTO schedules (bus_id, route_id, departure_time, arrival_time, fare) VALUES (?, ?, ?, ?, ?)")
+        .run(bus.id, route.id, departureTime, arrivalTime, parsedFare);
+
+      db.prepare("DELETE FROM route_stops WHERE route_id = ?").run(route.id);
+      const stopInsert = db.prepare("INSERT INTO route_stops (route_id, stop_name, stop_order, stop_time) VALUES (?, ?, ?, ?)");
+      stopList.forEach((stop) => {
+        stopInsert.run(route.id, stop.stop_name, stop.stop_order, stop.stop_time);
+      });
+
+      const schedule = db.prepare(`
+        SELECT s.id, s.departure_time, s.arrival_time, s.fare,
+               b.bus_number, b.bus_type, b.operator, b.capacity,
+               r.source, r.destination, r.distance_km
+        FROM schedules s
+        JOIN buses b ON s.bus_id = b.id
+        JOIN routes r ON s.route_id = r.id
+        WHERE s.id = ?
+        LIMIT 1
+      `).get(Number(scheduleInsert.lastInsertRowid));
+
+      return {
+        duplicate: false,
+        schedule,
+        stops: stopList,
+      };
+    });
+
+    const result = createSchedule();
+
+    if (result.duplicate) {
+      res.status(409).json({ success: false, message: "Schedule already exists" });
+      return;
+    }
+
+    res.status(201).json({ success: true, ...result });
   });
 
   

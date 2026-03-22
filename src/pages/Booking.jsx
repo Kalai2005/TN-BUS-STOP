@@ -43,6 +43,11 @@ export const Booking = () => {
         fullName: 'முழு பெயர்',
         age: 'வயது',
         gender: 'பாலினம்',
+        routePreview: 'பாதை முன்னோட்டம்',
+        betweenStops: 'இடை நிறுத்தங்கள்',
+        noStopsAvailable: 'இந்த பாதைக்கு இடைநிறுத்த விவரங்கள் இல்லை.',
+        departure: 'புறப்படும் இடம்',
+        destination: 'செல்லும் இடம்',
         paymentSummary: 'கட்டண சுருக்கம்',
         seatNumber: 'இருக்கை எண்',
         notSelected: 'தேர்வு செய்யப்படவில்லை',
@@ -84,6 +89,11 @@ export const Booking = () => {
         fullName: 'Full Name',
         age: 'Age',
         gender: 'Gender',
+        routePreview: 'Route Preview',
+        betweenStops: 'Between Stops',
+        noStopsAvailable: 'No intermediate stops available for this route.',
+        departure: 'Departure',
+        destination: 'Destination',
         paymentSummary: 'Payment Summary',
         seatNumber: 'Seat Number',
         notSelected: 'Not selected',
@@ -111,6 +121,7 @@ export const Booking = () => {
   });
   const [error, setError] = useState('');
   const [seatMessage, setSeatMessage] = useState(text.chooseSeat);
+  const [routeStops, setRouteStops] = useState([]);
 
   const formatTime = (value) => {
     if (!value) return 'N/A';
@@ -213,9 +224,13 @@ export const Booking = () => {
           setSeatMessage(text.chooseSeat);
         }
 
+        const stopsData = await api.getScheduleStops(id);
+        setRouteStops(Array.isArray(stopsData?.stops) ? stopsData.stops : []);
+
       } catch (err) {
         console.error('Failed to load booking data:', err);
         setError(text.loadFailed);
+        setRouteStops([]);
       } finally {
         setLoadingSchedule(false);
         setLoadingSeats(false);
@@ -409,6 +424,40 @@ export const Booking = () => {
             <div className="bus-summary-mini">
               <span className="mini-operator">{busDetails.operator}</span>
               <span className="mini-route">{busDetails.route}</span>
+            </div>
+          </div>
+
+          <div className="route-preview-card">
+            <h3 className="route-preview-title">{text.routePreview}</h3>
+            <div className="route-flow-row">
+              <div className="route-flow-item strong">
+                <span className="route-flow-label">{text.departure}</span>
+                <span className="route-flow-value">{busDetails.source}</span>
+                <span className="route-flow-time">{formatTime(busDetails.departureTime)}</span>
+              </div>
+
+              <div className="route-flow-middle">
+                <span className="route-flow-line" aria-hidden="true"></span>
+                <span className="route-flow-middle-text">{text.betweenStops}</span>
+                {routeStops.length > 0 ? (
+                  <ul className="route-stops-list">
+                    {routeStops.map((stop) => (
+                      <li key={stop.id || `${stop.stop_name}-${stop.stop_order}`} className="route-stop-item">
+                        <span>{stop.stop_name}</span>
+                        {stop.stop_time && <span className="route-stop-time">{formatTime(stop.stop_time)}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="route-no-stops">{text.noStopsAvailable}</p>
+                )}
+              </div>
+
+              <div className="route-flow-item strong">
+                <span className="route-flow-label">{text.destination}</span>
+                <span className="route-flow-value">{busDetails.destination}</span>
+                <span className="route-flow-time">{formatTime(busDetails.arrivalTime)}</span>
+              </div>
             </div>
           </div>
           
