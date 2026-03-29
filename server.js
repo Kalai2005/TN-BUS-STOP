@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
+import PDFDocument from "pdfkit";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getTravelAdvice } from "./src/Backend/geminiService.js";
@@ -85,6 +87,206 @@ const parseStopsInput = (stops) => {
     .map((stop, index) => ({ ...stop, stop_order: index + 1 }));
 };
 
+const buildAbsoluteApiUrl = (req, relativePath) => {
+  const configuredBaseUrl = String(process.env.PUBLIC_TICKET_BASE_URL || "").trim();
+  if (configuredBaseUrl) {
+    const normalizedBase = configuredBaseUrl.replace(/\/+$/, "");
+    return `${normalizedBase}${relativePath}`;
+  }
+
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  const originalHost = String(req.get("host") || "").trim();
+  const lanIp = getLocalNetworkIPv4();
+
+  // Replace localhost-style hosts so external phones on the same network can reach the server.
+  const normalizedHost = originalHost
+    .replace(/^localhost/i, lanIp || "localhost")
+    .replace(/^127\.0\.0\.1/i, lanIp || "127.0.0.1");
+
+  return `${protocol}://${normalizedHost}${relativePath}`;
+};
+
+const getLocalNetworkIPv4 = () => {
+  const interfaces = os.networkInterfaces();
+
+  const isLikelyVirtualInterface = (name = "") => {
+    const key = String(name).toLowerCase();
+    return (
+      key.includes("vethernet") ||
+      key.includes("virtual") ||
+      key.includes("vmware") ||
+      key.includes("vbox") ||
+      key.includes("hyper-v") ||
+      key.includes("wsl") ||
+      key.includes("loopback") ||
+      key.includes("docker") ||
+      key.includes("bluetooth")
+    );
+  };
+
+  const isPreferredLanAddress = (address = "") => {
+    return /^192\.168\./.test(address) || /^10\./.test(address);
+  };
+
+  const fallbackCandidates = [];
+
+  for (const [name, netIf] of Object.entries(interfaces)) {
+    if (!Array.isArray(netIf) || isLikelyVirtualInterface(name)) continue;
+    for (const detail of netIf) {
+      if (!detail || detail.internal || detail.family !== "IPv4") continue;
+      if (isPreferredLanAddress(detail.address)) {
+        return detail.address;
+      }
+      fallbackCandidates.push(detail.address);
+    }
+  }
+
+  return fallbackCandidates[0] || "";
+};
+
+const createTicketPdfUrl = (req, qrCode) => {
+  const safeCode = encodeURIComponent(String(qrCode || "").trim());
+  return buildAbsoluteApiUrl(req, `/api/tickets/${safeCode}/pdf`);
+};
+
+const extractTicketQrCode = (inputValue) => {
+  const raw = String(inputValue || "").trim();
+  if (!raw) return "";
+
+  const directMatch = raw.match(/TICKET-[A-Z0-9]+/i);
+  if (directMatch) {
+    return directMatch[0].toUpperCase();
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+
+      const fromQuery =
+        parsed.searchParams.get("qr_code") ||
+        parsed.searchParams.get("qr") ||
+        parsed.searchParams.get("ticket") ||
+        parsed.searchParams.get("id") ||
+        "";
+      const queryMatch = String(fromQuery).match(/TICKET-[A-Z0-9]+/i);
+      if (queryMatch) {
+        return queryMatch[0].toUpperCase();
+      }
+
+      const pathMatch = parsed.pathname.match(/\/api\/tickets\/([^/]+)\/pdf/i);
+      if (pathMatch?.[1]) {
+        const decoded = decodeURIComponent(pathMatch[1]);
+        const normalized = decoded.match(/TICKET-[A-Z0-9]+/i);
+        if (normalized) {
+          return normalized[0].toUpperCase();
+        }
+      }
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+};
+
+const getBookingByQrCodeSqlite = (qrCode) => {
+  return db.prepare(`
+    SELECT bk.id, bk.qr_code, bk.status, bk.booking_date, bk.seat_number,
+           bk.passenger_name, bk.passenger_age, bk.passenger_gender,
+           bk.physical_issued_at, bk.physical_issued_by, bk.boarded_at,
+           s.id AS schedule_id, s.departure_time, s.arrival_time, s.fare,
+           r.source, r.destination, r.distance_km,
+           b.bus_number, b.bus_type, b.operator
+    FROM bookings bk
+    JOIN schedules s ON bk.schedule_id = s.id
+    JOIN routes r ON s.route_id = r.id
+    JOIN buses b ON s.bus_id = b.id
+    WHERE bk.qr_code = ?
+    LIMIT 1
+  `).get(qrCode);
+};
+
+const formatDateTime = (value) => {
+  if (!value) return "N/A";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "N/A";
+  return parsed.toLocaleString("en-IN");
+};
+
+const getTicketPdfFileName = (booking) => {
+  return `tn-bus-ticket-${String(booking.qr_code || "ticket").replace(/[^a-zA-Z0-9-]/g, "")}.pdf`;
+};
+
+const writeTicketPdfHeaders = (res, booking) => {
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${getTicketPdfFileName(booking)}"`);
+};
+
+const generateTicketPdfBuffer = (booking) => {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const doc = new PDFDocument({ size: "A5", margin: 36 });
+
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.fontSize(18).text("TN SMART BUS", { align: "center" });
+    doc.moveDown(0.3);
+    doc.fontSize(11).text("Digital Ticket", { align: "center" });
+    doc.moveDown(1);
+
+    doc.fontSize(11);
+    doc.text(`Ticket ID: ${booking.qr_code || "N/A"}`);
+    doc.text(`Booking Ref: BK-${booking.id || "N/A"}`);
+    doc.text(`Passenger: ${booking.passenger_name || "N/A"}`);
+    doc.text(`Age / Gender: ${booking.passenger_age || "N/A"} / ${booking.passenger_gender || "N/A"}`);
+    doc.text(`Route: ${booking.source || "N/A"} -> ${booking.destination || "N/A"}`);
+    doc.text(`Departure: ${booking.departure_time || "N/A"}`);
+    doc.text(`Arrival: ${booking.arrival_time || "N/A"}`);
+    doc.text(`Seat: ${booking.seat_number || "N/A"}`);
+    doc.text(`Bus: ${booking.bus_number || "N/A"}`);
+    doc.text(`Operator: ${booking.operator || "N/A"}`);
+    doc.text(`Fare: INR ${Number(booking.fare || 0)}`);
+    doc.text(`Booked On: ${formatDateTime(booking.booking_date)}`);
+    doc.text(`Status: ${booking.status || "N/A"}`);
+
+    doc.moveDown(1);
+    doc.fontSize(9).fillColor("#555").text("Prototype ticket. Please show this ticket and valid ID while boarding.", {
+      align: "left",
+    });
+
+    doc.end();
+  });
+};
+
+const sendTicketPdfBuffer = (res, booking, pdfBuffer) => {
+  writeTicketPdfHeaders(res, booking);
+  res.end(pdfBuffer);
+};
+
+const streamTicketPdf = async (res, booking) => {
+  const pdfBuffer = await generateTicketPdfBuffer(booking);
+  sendTicketPdfBuffer(res, booking, pdfBuffer);
+};
+
+const persistFirestoreTicketPdfIfPossible = async (store, qrCode, booking) => {
+  if (!store?.uploadTicketPdfByQrCode || !booking) return { success: false };
+
+  const pdfBuffer = await generateTicketPdfBuffer(booking);
+  const saveResult = await store.uploadTicketPdfByQrCode({
+    qr_code: qrCode,
+    pdf_buffer: pdfBuffer,
+    file_name: getTicketPdfFileName(booking),
+  });
+
+  return {
+    success: Boolean(saveResult?.success),
+    downloadUrl: saveResult?.downloadUrl || "",
+    message: saveResult?.message || "",
+  };
+};
+
 const listenWithPortFallback = (app, startPort, host = "0.0.0.0", maxRetries = 10) =>
   new Promise((resolve, reject) => {
     const tryListen = (port, retriesLeft) => {
@@ -158,6 +360,9 @@ db.exec(`
     booking_date TEXT,
     status TEXT DEFAULT 'confirmed',
     qr_code TEXT,
+    physical_issued_at TEXT,
+    physical_issued_by TEXT,
+    boarded_at TEXT,
     passenger_name TEXT,
     passenger_age INTEGER,
     passenger_gender TEXT,
@@ -170,6 +375,9 @@ db.exec(`
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_name TEXT;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_age INTEGER;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_gender TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN physical_issued_at TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN physical_issued_by TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN boarded_at TEXT;"); } catch(e) {}
 
 // Seed Data (if empty)
 const routeCount = db.prepare("SELECT count(*) as count FROM routes").get();
@@ -781,7 +989,32 @@ async function startServer() {
         return;
       }
 
-      res.json(bookingResult);
+      let pdfStoredInFirestore = false;
+      let qrDownloadUrl = createTicketPdfUrl(req, bookingResult.qr_code);
+      if (firestoreStore.getBookingByQrCode && firestoreStore.uploadTicketPdfByQrCode) {
+        try {
+          const ticketLookup = await firestoreStore.getBookingByQrCode(bookingResult.qr_code);
+          if (ticketLookup?.success && ticketLookup.booking) {
+            const storageResult = await persistFirestoreTicketPdfIfPossible(
+              firestoreStore,
+              bookingResult.qr_code,
+              ticketLookup.booking
+            );
+            pdfStoredInFirestore = storageResult.success;
+            if (storageResult.downloadUrl) {
+              qrDownloadUrl = storageResult.downloadUrl;
+            }
+          }
+        } catch (error) {
+          console.warn("Unable to upload ticket PDF to Firebase Storage:", error.message);
+        }
+      }
+
+      res.json({
+        ...bookingResult,
+        qr_download_url: qrDownloadUrl,
+        pdf_stored_in_firestore: pdfStoredInFirestore,
+      });
       return;
     }
 
@@ -824,7 +1057,69 @@ async function startServer() {
     const qr_code = `TICKET-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
     const info = db.prepare("INSERT INTO bookings (user_id, schedule_id, seat_number, booking_date, qr_code, passenger_name, passenger_age, passenger_gender) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
       .run(user_id || 1, schedule_id, finalSeatNumber, new Date().toISOString(), qr_code, passenger_name, passenger_age, passenger_gender);
-    res.json({ success: true, bookingId: info.lastInsertRowid, qr_code });
+    res.json({
+      success: true,
+      bookingId: info.lastInsertRowid,
+      qr_code,
+      qr_download_url: createTicketPdfUrl(req, qr_code),
+    });
+  });
+
+  app.get("/api/tickets/:qrCode/pdf", async (req, res) => {
+    const qrCode = extractTicketQrCode(req.params.qrCode);
+
+    if (!qrCode) {
+      res.status(400).json({ success: false, message: "Valid ticket code is required" });
+      return;
+    }
+
+    if (firestoreStore.enabled) {
+      const result = firestoreStore.getBookingByQrCode
+        ? await firestoreStore.getBookingByQrCode(qrCode)
+        : await firestoreStore.scanBookingForConductor({ qr_code: qrCode, bus_number: "" });
+
+      if (!result.success || !result.booking) {
+        res.status(result.statusCode || 404).json({ success: false, message: result.message || "Ticket not found" });
+        return;
+      }
+
+      if (result.booking.status !== "confirmed") {
+        res.status(409).json({ success: false, message: `Ticket is ${result.booking.status}` });
+        return;
+      }
+
+      const existingStorageUrl = String(result.booking.ticket_pdf_download_url || "").trim();
+      if (existingStorageUrl) {
+        res.redirect(existingStorageUrl);
+        return;
+      }
+
+      try {
+        const storageResult = await persistFirestoreTicketPdfIfPossible(firestoreStore, qrCode, result.booking);
+        if (storageResult.success && storageResult.downloadUrl) {
+          res.redirect(storageResult.downloadUrl);
+          return;
+        }
+      } catch (error) {
+        console.warn("Unable to backfill ticket PDF in Firebase Storage:", error.message);
+      }
+
+      await streamTicketPdf(res, result.booking);
+      return;
+    }
+
+    const booking = getBookingByQrCodeSqlite(qrCode);
+    if (!booking) {
+      res.status(404).json({ success: false, message: "Ticket not found" });
+      return;
+    }
+
+    if (booking.status !== "confirmed") {
+      res.status(409).json({ success: false, message: `Ticket is ${booking.status}` });
+      return;
+    }
+
+    await streamTicketPdf(res, booking);
   });
 
   app.get("/api/user/bookings/:userId", async (req, res) => {
@@ -864,6 +1159,166 @@ async function startServer() {
 
     db.prepare("UPDATE bookings SET status = ? WHERE id = ?").run(status, id);
     res.json({ success: true });
+  });
+
+  app.post("/api/conductor/scan", async (req, res) => {
+    const qrCode = extractTicketQrCode(req.body?.qr_code);
+    const busNumber = String(req.body?.bus_number || "").trim();
+
+    if (!qrCode) {
+      res.status(400).json({ success: false, message: "Valid QR code or ticket URL is required" });
+      return;
+    }
+
+    if (firestoreStore.enabled) {
+      const result = await firestoreStore.scanBookingForConductor({
+        qr_code: qrCode,
+        bus_number: busNumber,
+      });
+
+      if (!result.success) {
+        res.status(result.statusCode || 400).json(result);
+        return;
+      }
+
+      res.json(result);
+      return;
+    }
+
+    const booking = getBookingByQrCodeSqlite(qrCode);
+
+    if (!booking) {
+      res.status(404).json({ success: false, message: "Ticket not found" });
+      return;
+    }
+
+    if (booking.status !== "confirmed") {
+      res.status(409).json({ success: false, message: `Ticket is ${booking.status}` });
+      return;
+    }
+
+    if (busNumber && String(booking.bus_number || "").toLowerCase() !== busNumber.toLowerCase()) {
+      res.status(409).json({ success: false, message: "Ticket belongs to a different bus" });
+      return;
+    }
+
+    res.json({
+      success: true,
+      alreadyIssued: Boolean(booking.physical_issued_at),
+      booking,
+    });
+  });
+
+  app.post("/api/conductor/issue-physical", async (req, res) => {
+    const bookingId = Number(req.body?.booking_id);
+    const conductorId = String(req.body?.conductor_id || "").trim() || "conductor";
+
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      res.status(400).json({ success: false, message: "Valid booking_id is required" });
+      return;
+    }
+
+    if (firestoreStore.enabled) {
+      const result = await firestoreStore.issuePhysicalTicket({
+        booking_id: String(bookingId),
+        conductor_id: conductorId,
+      });
+
+      if (!result.success) {
+        res.status(result.statusCode || 400).json(result);
+        return;
+      }
+
+      res.json(result);
+      return;
+    }
+
+    const issuePhysicalTicketTx = db.transaction((id, issuer) => {
+      const existing = db.prepare(`
+        SELECT bk.id, bk.qr_code, bk.status, bk.booking_date, bk.seat_number,
+               bk.passenger_name, bk.passenger_age, bk.passenger_gender,
+               bk.physical_issued_at, bk.physical_issued_by,
+               s.id AS schedule_id, s.departure_time, s.arrival_time, s.fare,
+               r.source, r.destination,
+               b.bus_number, b.bus_type, b.operator
+        FROM bookings bk
+        JOIN schedules s ON bk.schedule_id = s.id
+        JOIN routes r ON s.route_id = r.id
+        JOIN buses b ON s.bus_id = b.id
+        WHERE bk.id = ?
+        LIMIT 1
+      `).get(id);
+
+      if (!existing) {
+        return { success: false, statusCode: 404, message: "Booking not found" };
+      }
+
+      if (existing.status !== "confirmed") {
+        return { success: false, statusCode: 409, message: `Ticket is ${existing.status}` };
+      }
+
+      if (existing.physical_issued_at) {
+        return {
+          success: false,
+          statusCode: 409,
+          message: "Physical ticket is already issued",
+          alreadyIssued: true,
+          issuedAt: existing.physical_issued_at,
+          issuedBy: existing.physical_issued_by || null,
+        };
+      }
+
+      const now = new Date().toISOString();
+      const updateResult = db.prepare(`
+        UPDATE bookings
+        SET physical_issued_at = ?, physical_issued_by = ?, boarded_at = ?
+        WHERE id = ? AND physical_issued_at IS NULL
+      `).run(now, issuer, now, id);
+
+      if (updateResult.changes !== 1) {
+        return {
+          success: false,
+          statusCode: 409,
+          message: "Physical ticket is already issued",
+          alreadyIssued: true,
+        };
+      }
+
+      return {
+        success: true,
+        alreadyIssued: false,
+        issuedAt: now,
+        issuedBy: issuer,
+        ticket: {
+          booking_id: existing.id,
+          qr_code: existing.qr_code,
+          booking_date: existing.booking_date,
+          schedule_id: existing.schedule_id,
+          source: existing.source,
+          destination: existing.destination,
+          departure_time: existing.departure_time,
+          arrival_time: existing.arrival_time,
+          fare: existing.fare,
+          seat_number: existing.seat_number,
+          passenger_name: existing.passenger_name,
+          passenger_age: existing.passenger_age,
+          passenger_gender: existing.passenger_gender,
+          bus_number: existing.bus_number,
+          bus_type: existing.bus_type,
+          operator: existing.operator,
+          physical_issued_at: now,
+          physical_issued_by: issuer,
+        },
+      };
+    });
+
+    const result = issuePhysicalTicketTx(bookingId, conductorId);
+    if (!result.success) {
+      res.status(result.statusCode || 400).json(result);
+      return;
+    }
+
+    res.json(result);
   });
 
   

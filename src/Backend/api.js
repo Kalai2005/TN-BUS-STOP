@@ -37,4 +37,24 @@ export const api = {
 
   getAdminStats: () =>
     fetch('/api/admin/stats').then(r => r.json()),
+
+  conductorScan: ({ qrCode, busNumber = '' }) =>
+    fetch('/api/conductor/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        qr_code: qrCode,
+        bus_number: busNumber,
+      })
+    }).then(r => r.json()),
+
+  issuePhysicalTicket: ({ bookingId, conductorId }) =>
+    fetch('/api/conductor/issue-physical', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        booking_id: bookingId,
+        conductor_id: conductorId,
+      })
+    }).then(r => r.json()),
 };

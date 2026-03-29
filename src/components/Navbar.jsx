@@ -15,6 +15,7 @@ export const Navbar = () => {
       search: 'Search',
       services: 'Services',
       bookings: 'My Bookings',
+      conductor: 'Conductor',
       admin: 'Admin',
       login: 'Login',
       switchText: 'தமிழ்',
@@ -25,6 +26,7 @@ export const Navbar = () => {
       search: 'தேடல்',
       services: 'சேவைகள்',
       bookings: 'என் முன்பதிவுகள்',
+      conductor: 'கண்டக்டர்',
       admin: 'நிர்வாகம்',
       login: 'உள்நுழைவு',
       switchText: 'English',
@@ -51,6 +53,7 @@ export const Navbar = () => {
             <Link to="/" className="nav-link">{t.search}</Link>
             <Link to="/services" className="nav-link">{t.services}</Link>
             <Link to="/my-bookings" className="nav-link">{t.bookings}</Link>
+            <Link to="/conductor" className="nav-link">{t.conductor}</Link>
             <Link to="/admin" className="nav-link">{t.admin}</Link>
             <button
               type="button"
@@ -92,6 +95,7 @@ export const Navbar = () => {
             <Link to="/" onClick={() => setIsOpen(false)} className="mobile-link">{t.search}</Link>
             <Link to="/services" onClick={() => setIsOpen(false)} className="mobile-link">{t.services}</Link>
             <Link to="/my-bookings" onClick={() => setIsOpen(false)} className="mobile-link">{t.bookings}</Link>
+            <Link to="/conductor" onClick={() => setIsOpen(false)} className="mobile-link">{t.conductor}</Link>
             <Link to="/admin" onClick={() => setIsOpen(false)} className="mobile-link">{t.admin}</Link>
             <Link to="/login" onClick={() => setIsOpen(false)} className="mobile-link">{t.login}</Link>
           </motion.div>

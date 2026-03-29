@@ -1,5 +1,6 @@
 import { getApps, initializeApp, cert, applicationDefault } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 
@@ -242,6 +243,12 @@ const buildSearchableSchedule = ({
 
 export const createFirestoreStore = async (sqliteDb) => {
   const firestore = getFirestoreDb();
+  const projectId = process.env.FIREBASE_PROJECT_ID || getApps()?.[0]?.options?.projectId || "";
+  const storageBucketName = String(
+    process.env.FIREBASE_STORAGE_BUCKET ||
+    (projectId ? `${projectId}.appspot.com` : "")
+  ).trim();
+  const storageBucket = storageBucketName ? getStorage().bucket(storageBucketName) : null;
 
   if (!firestore) {
     return {
@@ -266,6 +273,7 @@ export const createFirestoreStore = async (sqliteDb) => {
     enabled: true,
     mode: "firestore",
     reason: "Firestore initialized successfully.",
+    storageBucketName,
     async getLocations() {
       const routes = await firestore.collection("routes").get();
       const set = new Set();
@@ -415,6 +423,9 @@ export const createFirestoreStore = async (sqliteDb) => {
         booking_date: new Date().toISOString(),
         status: "confirmed",
         qr_code: qrCode,
+        physical_issued_at: null,
+        physical_issued_by: null,
+        boarded_at: null,
         passenger_name,
         passenger_age: toNumber(passenger_age),
         passenger_gender,
@@ -463,6 +474,203 @@ export const createFirestoreStore = async (sqliteDb) => {
       }
       await ref.update({ status });
       return { found: true };
+    },
+
+    async getBookingByQrCode(qr_code) {
+      const qrCode = String(qr_code || "").trim();
+      if (!qrCode) {
+        return { success: false, statusCode: 400, message: "QR code is required" };
+      }
+
+      const snapshot = await firestore
+        .collection("bookings")
+        .where("qr_code", "==", qrCode)
+        .limit(1)
+        .get();
+
+      if (snapshot.empty) {
+        return { success: false, statusCode: 404, message: "Ticket not found" };
+      }
+
+      const doc = snapshot.docs[0];
+      return {
+        success: true,
+        ref: doc.ref,
+        booking: { id: doc.id, ...doc.data() },
+      };
+    },
+
+    async saveTicketPdfByQrCode({ qr_code, pdf_base64 }) {
+      const qrCode = String(qr_code || "").trim();
+      const pdfBase64 = String(pdf_base64 || "").trim();
+
+      if (!qrCode || !pdfBase64) {
+        return { success: false, statusCode: 400, message: "qr_code and pdf_base64 are required" };
+      }
+
+      const lookup = await this.getBookingByQrCode(qrCode);
+      if (!lookup.success || !lookup.ref) {
+        return lookup;
+      }
+
+      await lookup.ref.update({
+        ticket_pdf_base64: pdfBase64,
+        ticket_pdf_mime: "application/pdf",
+        ticket_pdf_updated_at: new Date().toISOString(),
+      });
+
+      return { success: true };
+    },
+
+    async uploadTicketPdfByQrCode({ qr_code, pdf_buffer, file_name }) {
+      const qrCode = String(qr_code || "").trim();
+      const fileName = String(file_name || "ticket.pdf").replace(/[^a-zA-Z0-9._-]/g, "-");
+
+      if (!qrCode || !pdf_buffer) {
+        return { success: false, statusCode: 400, message: "qr_code and pdf_buffer are required" };
+      }
+
+      if (!storageBucket) {
+        return {
+          success: false,
+          statusCode: 400,
+          message: "Firebase Storage bucket is not configured. Set FIREBASE_STORAGE_BUCKET.",
+        };
+      }
+
+      const lookup = await this.getBookingByQrCode(qrCode);
+      if (!lookup.success || !lookup.ref || !lookup.booking) {
+        return lookup;
+      }
+
+      const objectPath = `tickets/${qrCode}/${Date.now()}-${fileName}`;
+      const file = storageBucket.file(objectPath);
+
+      await file.save(pdf_buffer, {
+        resumable: false,
+        contentType: "application/pdf",
+        metadata: {
+          contentType: "application/pdf",
+          cacheControl: "private, max-age=0, no-cache",
+        },
+      });
+
+      let downloadUrl = "";
+      try {
+        const [signedUrl] = await file.getSignedUrl({
+          action: "read",
+          expires: "03-01-2035",
+        });
+        downloadUrl = signedUrl;
+      } catch {
+        try {
+          await file.makePublic();
+          downloadUrl = file.publicUrl();
+        } catch {
+          downloadUrl = "";
+        }
+      }
+
+      await lookup.ref.update({
+        ticket_pdf_storage_path: objectPath,
+        ticket_pdf_download_url: downloadUrl,
+        ticket_pdf_mime: "application/pdf",
+        ticket_pdf_updated_at: new Date().toISOString(),
+      });
+
+      return {
+        success: true,
+        objectPath,
+        downloadUrl,
+      };
+    },
+
+    async scanBookingForConductor({ qr_code, bus_number }) {
+      const qrCode = String(qr_code || "").trim();
+      const busNumber = String(bus_number || "").trim().toLowerCase();
+
+      if (!qrCode) {
+        return { success: false, statusCode: 400, message: "QR code is required" };
+      }
+
+      const lookup = await this.getBookingByQrCode(qrCode);
+      if (!lookup.success || !lookup.booking) {
+        return lookup;
+      }
+
+      const booking = lookup.booking;
+
+      if (booking.status !== "confirmed") {
+        return { success: false, statusCode: 409, message: `Ticket is ${booking.status}` };
+      }
+
+      if (busNumber && String(booking.bus_number || "").trim().toLowerCase() !== busNumber) {
+        return { success: false, statusCode: 409, message: "Ticket belongs to a different bus" };
+      }
+
+      return {
+        success: true,
+        alreadyIssued: Boolean(booking.physical_issued_at),
+        booking,
+      };
+    },
+
+    async issuePhysicalTicket({ booking_id, conductor_id }) {
+      const bookingId = String(booking_id || "").trim();
+      const conductorId = String(conductor_id || "").trim() || "conductor";
+
+      if (!bookingId) {
+        return { success: false, statusCode: 400, message: "booking_id is required" };
+      }
+
+      const ref = firestore.collection("bookings").doc(bookingId);
+
+      const result = await firestore.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(ref);
+
+        if (!snapshot.exists) {
+          return { success: false, statusCode: 404, message: "Booking not found" };
+        }
+
+        const booking = { id: snapshot.id, ...snapshot.data() };
+
+        if (booking.status !== "confirmed") {
+          return { success: false, statusCode: 409, message: `Ticket is ${booking.status}` };
+        }
+
+        if (booking.physical_issued_at) {
+          return {
+            success: false,
+            statusCode: 409,
+            message: "Physical ticket is already issued",
+            alreadyIssued: true,
+            issuedAt: booking.physical_issued_at,
+            issuedBy: booking.physical_issued_by || null,
+          };
+        }
+
+        const now = new Date().toISOString();
+        transaction.update(ref, {
+          physical_issued_at: now,
+          physical_issued_by: conductorId,
+          boarded_at: now,
+        });
+
+        return {
+          success: true,
+          alreadyIssued: false,
+          issuedAt: now,
+          issuedBy: conductorId,
+          ticket: {
+            ...booking,
+            booking_id: booking.id,
+            physical_issued_at: now,
+            physical_issued_by: conductorId,
+          },
+        };
+      });
+
+      return result;
     },
 
     async getAdminStats() {

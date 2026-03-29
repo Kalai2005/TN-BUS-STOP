@@ -16,6 +16,7 @@ import { Support } from './pages/Support';
 import { SearchBus } from './pages/SearchBus';
 import { RouteTracking } from './pages/RouteTracking';
 import { QRTicket } from './pages/QRTicket';
+import { ConductorScan } from './pages/ConductorScan';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LanguageProvider } from './context/LanguageContext';
 
@@ -41,6 +42,7 @@ export default function App() {
               <Route path="/search" element={<SearchBus />} />
               <Route path="/track" element={<RouteTracking />} />
               <Route path="/ticket" element={<QRTicket />} />
+              <Route path="/conductor" element={<ProtectedRoute><ConductorScan /></ProtectedRoute>} />
               <Route path="/book/:id" element={<Booking />} />
               <Route path="/my-bookings" element={<MyBookings />} />
               <Route path="/admin" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />

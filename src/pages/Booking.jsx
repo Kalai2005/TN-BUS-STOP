@@ -55,6 +55,10 @@ export const Booking = () => {
         serviceFee: 'சேவை கட்டணம்',
         totalAmount: 'மொத்த தொகை',
         nextDayArrival: 'அடுத்த நாள் வருகை',
+        scanToDownload: 'இந்த QR-ஐ வெளியக மொபைல் கேமரா மூலம் ஸ்கேன் செய்தால் டிக்கெட் PDF பதிவிறக்கம் செய்யப்படும்.',
+        downloadTicketPdf: 'டிக்கெட் PDF பதிவிறக்கு',
+        externalQrMissing: 'வெளியக பதிவிறக்க URL கிடைக்கவில்லை. .env-ல் PUBLIC_TICKET_BASE_URL அமைத்து சர்வரை மறுதொடக்கம் செய்து, புதிய டிக்கெட் முன்பதிவு செய்யவும்.',
+        qrUrlLabel: 'QR இணைப்பு',
       }
     : {
         chooseSeat: 'Please choose an available seat to continue.',
@@ -101,6 +105,10 @@ export const Booking = () => {
         serviceFee: 'Service Fee',
         totalAmount: 'Total Amount',
         nextDayArrival: 'Next day arrival',
+        scanToDownload: 'Scan this QR with an external phone camera to download the ticket PDF.',
+        downloadTicketPdf: 'Download Ticket PDF',
+        externalQrMissing: 'External download URL is missing. Set PUBLIC_TICKET_BASE_URL in .env, restart server, and book a new ticket.',
+        qrUrlLabel: 'QR URL',
       };
   const { id } = useParams();
   const navigate = useNavigate();
@@ -249,6 +257,7 @@ export const Booking = () => {
   const serviceFee = isLocalBus ? 1 : 25;
   const totalAmount = baseFare + serviceFee;
   const bookingDayOffset = getDayOffset(busDetails?.departureTime, busDetails?.arrivalTime);
+  const ticketDownloadUrl = ticket?.qr_download_url || '';
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -655,8 +664,29 @@ export const Booking = () => {
           </div>
           
           <div className="qr-container">
-            <QRCodeSVG value={ticket.qr_code} size={200} />
+            <QRCodeSVG value={ticketDownloadUrl || ticket.qr_code} size={200} />
           </div>
+          <p className="qr-help-text">{text.scanToDownload}</p>
+
+          {!ticketDownloadUrl && (
+            <p className="qr-warning-text">{text.externalQrMissing}</p>
+          )}
+
+          {ticketDownloadUrl && (
+            <div className="qr-download-wrap">
+              <p className="qr-url-text">
+                <span>{text.qrUrlLabel}:</span> {ticketDownloadUrl}
+              </p>
+              <a
+                className="download-ticket-link"
+                href={ticketDownloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {text.downloadTicketPdf}
+              </a>
+            </div>
+          )}
 
           <div className="ticket-divider"></div>
           

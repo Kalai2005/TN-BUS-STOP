@@ -561,6 +561,60 @@
   justify-content: center;
 }
 
+.qr-help-text {
+  margin: 0;
+  padding: 0 32px 14px;
+  text-align: center;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.qr-warning-text {
+  margin: 0;
+  padding: 0 32px 14px;
+  text-align: center;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qr-download-wrap {
+  padding: 0 32px 20px;
+}
+
+.qr-url-text {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.qr-url-text span {
+  font-weight: 700;
+}
+
+.download-ticket-link {
+  display: block;
+  width: 100%;
+  text-align: center;
+  background-color: #0f766e;
+  color: #ffffff;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-weight: 700;
+  transition: background-color 0.2s;
+}
+
+.download-ticket-link:hover {
+  background-color: #115e59;
+}
+
 .ticket-divider {
   height: 1px;
   border-top: 2px dashed #e2e8f0;
@@ -682,6 +736,18 @@
 
   .qr-container {
     padding: 20px;
+  }
+
+  .qr-help-text {
+    padding: 0 16px 12px;
+  }
+
+  .qr-warning-text {
+    padding: 0 16px 12px;
+  }
+
+  .qr-download-wrap {
+    padding: 0 16px 16px;
   }
 
   .ticket-divider {
