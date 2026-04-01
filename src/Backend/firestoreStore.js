@@ -16,6 +16,22 @@ const parsePrivateKey = (value) => {
   return String(value).replace(/\\n/g, "\n");
 };
 
+const ALLOWED_ADMIN_BUS_TYPES = new Set(["TNSTC", "KSRTC", "SETC", "Local buses"]);
+
+const FARE_CONFIG = {
+  local: { base: 4, perKm: 1.2, perStop: 0.8, min: 6 },
+  express: { base: 20, perKm: 1.8, perStop: 1.5, min: 20 },
+};
+
+const calculateDistanceStopFare = ({ distanceKm, stopCount, isLocalRoute }) => {
+  const config = isLocalRoute ? FARE_CONFIG.local : FARE_CONFIG.express;
+  const safeDistance = Math.max(0, toNumber(distanceKm, 0));
+  const safeStops = Math.max(2, toNumber(stopCount, 2));
+
+  const fare = config.base + (safeDistance * config.perKm) + ((safeStops - 1) * config.perStop);
+  return Math.max(config.min, Math.round(fare));
+};
+
 const getCredentialsFromFile = () => {
   const configuredPath = process.env.FIREBASE_CREDENTIALS_PATH;
   const candidatePaths = [
@@ -87,7 +103,7 @@ const seedFirestoreFromSqlite = async (sqliteDb, firestore) => {
   const buses = sqliteDb.prepare("SELECT * FROM buses").all();
   const routes = sqliteDb.prepare("SELECT * FROM routes").all();
   const schedules = sqliteDb.prepare(`
-    SELECT s.id, s.bus_id, s.route_id, s.departure_time, s.arrival_time, s.fare,
+    SELECT s.id, s.bus_id, s.route_id, s.departure_time, s.arrival_time, s.fare, s.between_stop_rate,
            b.bus_number, b.bus_type, b.operator, b.capacity,
            r.source, r.destination, r.distance_km
     FROM schedules s
@@ -174,23 +190,28 @@ const parseStopEntry = (entry) => {
   if (entry && typeof entry === "object" && !Array.isArray(entry)) {
     const stopName = String(entry.stop_name || entry.name || "").trim();
     const stopTime = String(entry.stop_time || entry.time || "").trim();
+    const segmentPrice = toNumber(entry.segment_price, 0);
     if (!stopName) return null;
     return {
       stop_name: stopName,
       ...(stopTime ? { stop_time: stopTime } : {}),
+      segment_price: Math.max(0, segmentPrice),
     };
   }
 
   const raw = String(entry || "").trim();
   if (!raw) return null;
 
-  const [namePart, timePart] = raw.split("|").map((part) => String(part || "").trim());
+  const [namePart, timePart, pricePart] = raw.split("|").map((part) => String(part || "").trim());
   if (!namePart) return null;
+
+  const parsedPrice = toNumber(pricePart, 0);
 
   const payload = { stop_name: namePart };
   if (timePart) {
     payload.stop_time = timePart;
   }
+  payload.segment_price = Math.max(0, parsedPrice);
 
   return payload;
 };
@@ -222,6 +243,7 @@ const buildSearchableSchedule = ({
   departure_time,
   arrival_time,
   fare,
+  between_stop_rate,
 }) => ({
   id,
   bus_id: toNumber(bus.id),
@@ -230,6 +252,7 @@ const buildSearchableSchedule = ({
   departure_time,
   arrival_time,
   fare: toNumber(fare),
+  between_stop_rate: toNumber(between_stop_rate, 0),
   bus_number: bus.bus_number,
   bus_type: bus.bus_type,
   operator: bus.operator,
@@ -300,13 +323,26 @@ export const createFirestoreStore = async (sqliteDb) => {
 
         if (sourceMatches && destinationMatches) {
           results.push({
-            id: toNumber(item.id, Number(doc.id) || 0),
             ...item,
+            id: doc.id,
           });
         }
       });
 
-      return results.sort(sortByDeparture);
+      const sortedResults = results.sort(sortByDeparture);
+      const enriched = await Promise.all(
+        sortedResults.map(async (item) => {
+          const stopResult = await this.getScheduleStops(item.id);
+          const stops = stopResult.found ? stopResult.stops : [];
+          return {
+            ...item,
+            between_stops: stops,
+            stops_count: stops.length,
+          };
+        })
+      );
+
+      return enriched;
     },
 
     async getScheduleById(id) {
@@ -314,8 +350,8 @@ export const createFirestoreStore = async (sqliteDb) => {
       if (!doc.exists) return null;
       const data = doc.data();
       return {
-        id: toNumber(data.id, Number(doc.id) || 0),
         ...data,
+        id: doc.id,
       };
     },
 
@@ -360,6 +396,7 @@ export const createFirestoreStore = async (sqliteDb) => {
           stop_name: data.stop_name,
           stop_time: data.stop_time || null,
           stop_order: toNumber(data.stop_order, 0),
+          segment_price: toNumber(data.segment_price, 0),
         });
       });
 
@@ -383,18 +420,116 @@ export const createFirestoreStore = async (sqliteDb) => {
         .filter(Boolean);
     },
 
-    async createBooking({ user_id, schedule_id, seat_number, passenger_name, passenger_age, passenger_gender }) {
+    async createBooking({
+      user_id,
+      schedule_id,
+      seat_number,
+      passenger_name,
+      passenger_age,
+      passenger_gender,
+      boarding_stop,
+      drop_stop,
+      ticket_count,
+    }) {
       const schedule = await this.getScheduleById(schedule_id);
       if (!schedule) {
         return { success: false, statusCode: 404, message: "Schedule not found" };
       }
 
       const isLocalRoute = String(schedule.bus_type || "").toLowerCase().includes("local");
+      const parsedTicketCount = Number.isInteger(Number(ticket_count)) ? Number(ticket_count) : 1;
+
+      if (parsedTicketCount < 1 || parsedTicketCount > 10) {
+        return { success: false, statusCode: 400, message: "ticket_count must be between 1 and 10" };
+      }
+
       if (!isLocalRoute && !seat_number) {
         return { success: false, statusCode: 400, message: "Seat number is required for this bus" };
       }
 
+      let finalBoardingStop = null;
+      let finalDropStop = null;
+      let routeStopCount = 2;
+      let segmentStopCount = 2;
+      let segmentDistanceKm = toNumber(schedule.distance_km, 0);
+
+      if (isLocalRoute) {
+        const scheduleStops = await this.getScheduleStops(schedule_id);
+        const fullRouteStops = [
+          { stop_name: schedule.source },
+          ...(Array.isArray(scheduleStops.stops) ? scheduleStops.stops : []),
+          { stop_name: schedule.destination },
+        ];
+
+        const dedupedStops = [];
+        const seen = new Set();
+        fullRouteStops.forEach((stop) => {
+          const stopName = String(stop.stop_name || "").trim();
+          if (!stopName) return;
+          const key = stopName.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          dedupedStops.push(stopName);
+        });
+
+        const requestedBoarding = String(boarding_stop || "").trim() || schedule.source;
+        const requestedDrop = String(drop_stop || "").trim() || schedule.destination;
+        const boardingIndex = dedupedStops.findIndex((name) => name.toLowerCase() === requestedBoarding.toLowerCase());
+        const dropIndex = dedupedStops.findIndex((name) => name.toLowerCase() === requestedDrop.toLowerCase());
+
+        if (boardingIndex === -1 || dropIndex === -1 || boardingIndex >= dropIndex) {
+          return { success: false, statusCode: 400, message: "Invalid local boarding/drop stops" };
+        }
+
+        finalBoardingStop = dedupedStops[boardingIndex];
+        finalDropStop = dedupedStops[dropIndex];
+        routeStopCount = Math.max(dedupedStops.length, 2);
+        segmentStopCount = Math.max((dropIndex - boardingIndex) + 1, 2);
+
+        const totalSegments = Math.max(routeStopCount - 1, 1);
+        const segmentRatio = Math.min(1, Math.max(1 / totalSegments, (segmentStopCount - 1) / totalSegments));
+        segmentDistanceKm = toNumber(schedule.distance_km, 0) * segmentRatio;
+
+        const fallbackSegmentRate = Math.max(0, toNumber(schedule.between_stop_rate, 0));
+        const stopsWithPrice = Array.isArray(scheduleStops.stops) ? scheduleStops.stops : [];
+        const segmentPrices = [];
+        for (let segmentIndex = 0; segmentIndex < dedupedStops.length - 1; segmentIndex += 1) {
+          const fromRouteStop = stopsWithPrice[segmentIndex];
+          const configuredPrice = toNumber(fromRouteStop?.segment_price, 0);
+          segmentPrices.push(configuredPrice > 0 ? configuredPrice : fallbackSegmentRate);
+        }
+
+        const summedSegmentFare = segmentPrices
+          .slice(boardingIndex, dropIndex)
+          .reduce((sum, price) => sum + toNumber(price, 0), 0);
+
+        if (summedSegmentFare > 0) {
+          segmentDistanceKm = 0;
+          segmentStopCount = 2;
+          routeStopCount = 2;
+          schedule.segment_price_based_fare = Math.max(1, Math.round(summedSegmentFare));
+        }
+      } else {
+        const scheduleStops = await this.getScheduleStops(schedule_id);
+        routeStopCount = Math.max((Array.isArray(scheduleStops.stops) ? scheduleStops.stops.length : 0) + 2, 2);
+        segmentStopCount = routeStopCount;
+      }
+
       const finalSeatNumber = isLocalRoute ? "N/A" : seat_number;
+      const fixedBetweenStopRate = Math.max(0, toNumber(schedule.between_stop_rate, 0));
+      const segmentBasedFare = toNumber(schedule.segment_price_based_fare, 0);
+      const unitFare = (isLocalRoute && (fixedBetweenStopRate > 0 || segmentBasedFare > 0))
+        ? Math.max(1, Math.round(
+            segmentBasedFare > 0
+              ? segmentBasedFare
+              : fixedBetweenStopRate * Math.max(segmentStopCount - 1, 1)
+          ))
+        : calculateDistanceStopFare({
+            distanceKm: segmentDistanceKm,
+            stopCount: segmentStopCount,
+            isLocalRoute,
+          });
+      const totalFare = unitFare * parsedTicketCount;
 
       if (!isLocalRoute) {
         const existingSeat = await firestore
@@ -420,6 +555,11 @@ export const createFirestoreStore = async (sqliteDb) => {
         user_id: toNumber(user_id, 1),
         schedule_id: toNumber(schedule_id),
         seat_number: finalSeatNumber,
+        ticket_count: parsedTicketCount,
+        boarding_stop: finalBoardingStop,
+        drop_stop: finalDropStop,
+        unit_fare: unitFare,
+        total_fare: totalFare,
         booking_date: new Date().toISOString(),
         status: "confirmed",
         qr_code: qrCode,
@@ -429,7 +569,7 @@ export const createFirestoreStore = async (sqliteDb) => {
         passenger_name,
         passenger_age: toNumber(passenger_age),
         passenger_gender,
-        fare: toNumber(schedule.fare),
+        fare: totalFare,
         departure_time: schedule.departure_time,
         arrival_time: schedule.arrival_time,
         source: schedule.source,
@@ -446,6 +586,8 @@ export const createFirestoreStore = async (sqliteDb) => {
         success: true,
         bookingId: bookingRef.id,
         qr_code: qrCode,
+        unit_fare: unitFare,
+        total_fare: totalFare,
       };
     },
 
@@ -699,8 +841,8 @@ export const createFirestoreStore = async (sqliteDb) => {
         .map((doc) => {
           const data = doc.data();
           return {
-            id: data.id || doc.id,
             ...data,
+            id: doc.id,
           };
         })
         .sort((a, b) => String(b.departure_time || "").localeCompare(String(a.departure_time || "")))
@@ -719,6 +861,7 @@ export const createFirestoreStore = async (sqliteDb) => {
         departure_time,
         arrival_time,
         fare,
+        between_stop_rate,
         stops,
       } = payload;
 
@@ -734,10 +877,27 @@ export const createFirestoreStore = async (sqliteDb) => {
         return { success: false, statusCode: 400, message: "Missing required fields" };
       }
 
+      if (!ALLOWED_ADMIN_BUS_TYPES.has(busType)) {
+        return {
+          success: false,
+          statusCode: 400,
+          message: "bus_type must be one of: TNSTC, KSRTC, SETC, Local buses",
+        };
+      }
+
       const parsedCapacity = Math.max(1, toNumber(capacity, 40));
       const parsedFare = Math.max(0, toNumber(fare, 0));
       const parsedDistance = Math.max(0, toNumber(distance_km, 0));
+      const parsedBetweenStopRate = Math.max(0, toNumber(between_stop_rate, 0));
       const stopList = parseStopsInput(stops);
+      const computedStopCount = Math.max(stopList.length + 2, 2);
+      const finalFare = parsedFare > 0
+        ? parsedFare
+        : calculateDistanceStopFare({
+            distanceKm: parsedDistance,
+            stopCount: computedStopCount,
+            isLocalRoute: String(busType).toLowerCase().includes("local"),
+          });
 
       const [busSnapshot, routeSnapshot, scheduleSnapshot] = await Promise.all([
         firestore.collection("buses").where("bus_number", "==", busNumber).limit(1).get(),
@@ -806,13 +966,14 @@ export const createFirestoreStore = async (sqliteDb) => {
 
       const scheduleRef = firestore.collection("schedules").doc();
       const scheduleData = buildSearchableSchedule({
-        id: toNumber(scheduleRef.id, 0) || scheduleRef.id,
+        id: scheduleRef.id,
         bus: busData,
         route: routeData,
         route_doc_id: routeRef.id,
         departure_time: departureTime,
         arrival_time: arrivalTime,
-        fare: parsedFare,
+        fare: finalFare,
+        between_stop_rate: parsedBetweenStopRate,
       });
 
       const batch = firestore.batch();
@@ -824,6 +985,7 @@ export const createFirestoreStore = async (sqliteDb) => {
         const stopRef = firestore.collection("route_stops").doc();
         batch.set(stopRef, {
           ...stop,
+          segment_price: toNumber(stop.segment_price, 0),
           route_id: routeData.id,
           route_doc_id: routeRef.id,
           source: routeData.source,
@@ -838,6 +1000,202 @@ export const createFirestoreStore = async (sqliteDb) => {
         schedule: {
           ...scheduleData,
           id: scheduleRef.id,
+        },
+        stops: stopList,
+      };
+    },
+
+    async deleteSchedule(schedule_id) {
+      const scheduleId = String(schedule_id || "").trim();
+      if (!scheduleId) {
+        return { success: false, statusCode: 400, message: "schedule_id is required" };
+      }
+
+      const scheduleRef = firestore.collection("schedules").doc(scheduleId);
+      const scheduleSnapshot = await scheduleRef.get();
+
+      if (!scheduleSnapshot.exists) {
+        return { success: false, statusCode: 404, message: "Schedule not found" };
+      }
+
+      const scheduleData = scheduleSnapshot.data();
+
+      // Delete the schedule and related route stops
+      const batch = firestore.batch();
+      batch.delete(scheduleRef);
+
+      // Delete associated route stops
+      if (scheduleData.route_doc_id) {
+        const stopsSnapshot = await firestore
+          .collection("route_stops")
+          .where("route_doc_id", "==", scheduleData.route_doc_id)
+          .get();
+        stopsSnapshot.docs.forEach((doc) => batch.delete(doc.ref));
+      }
+
+      await batch.commit();
+
+      return { success: true, message: "Schedule deleted successfully" };
+    },
+
+    async updateSchedule(schedule_id, updates) {
+      const scheduleId = String(schedule_id || "").trim();
+      const {
+        bus_number,
+        bus_type,
+        operator,
+        capacity,
+        source,
+        destination,
+        distance_km,
+        departure_time,
+        arrival_time,
+        fare,
+        between_stop_rate,
+        stops,
+      } = updates || {};
+
+      if (!scheduleId) {
+        return { success: false, statusCode: 400, message: "schedule_id is required" };
+      }
+
+      const scheduleRef = firestore.collection("schedules").doc(scheduleId);
+      const scheduleSnapshot = await scheduleRef.get();
+
+      if (!scheduleSnapshot.exists) {
+        return { success: false, statusCode: 404, message: "Schedule not found" };
+      }
+
+      const busNumber = String(bus_number || "").trim();
+      const busType = String(bus_type || "").trim();
+      const busOperator = String(operator || "").trim();
+      const sourceCity = String(source || "").trim();
+      const destinationCity = String(destination || "").trim();
+      const departureTime = String(departure_time || "").trim();
+      const arrivalTime = String(arrival_time || "").trim();
+
+      if (!busNumber || !busType || !busOperator || !sourceCity || !destinationCity || !departureTime || !arrivalTime) {
+        return { success: false, statusCode: 400, message: "Missing required fields" };
+      }
+
+      if (!ALLOWED_ADMIN_BUS_TYPES.has(busType)) {
+        return {
+          success: false,
+          statusCode: 400,
+          message: "bus_type must be one of: TNSTC, KSRTC, SETC, Local buses",
+        };
+      }
+
+      const parsedCapacity = Math.max(1, toNumber(capacity, 40));
+      const parsedFare = Math.max(0, toNumber(fare, 0));
+      const parsedDistance = Math.max(0, toNumber(distance_km, 0));
+      const parsedBetweenStopRate = Math.max(0, toNumber(between_stop_rate, 0));
+      const stopList = parseStopsInput(stops);
+      const computedStopCount = Math.max(stopList.length + 2, 2);
+      const finalFare = parsedFare > 0
+        ? parsedFare
+        : calculateDistanceStopFare({
+            distanceKm: parsedDistance,
+            stopCount: computedStopCount,
+            isLocalRoute: String(busType).toLowerCase().includes("local"),
+          });
+
+      const [busSnapshot, routeSnapshot] = await Promise.all([
+        firestore.collection("buses").where("bus_number", "==", busNumber).limit(1).get(),
+        firestore
+          .collection("routes")
+          .where("source", "==", sourceCity)
+          .where("destination", "==", destinationCity)
+          .limit(1)
+          .get(),
+      ]);
+
+      let busRef, busData;
+      if (busSnapshot.empty) {
+        busRef = firestore.collection("buses").doc();
+        busData = {
+          id: toNumber(busRef.id, 0) || busRef.id,
+          bus_number: busNumber,
+          bus_type: busType,
+          capacity: parsedCapacity,
+          operator: busOperator,
+        };
+      } else {
+        busRef = busSnapshot.docs[0].ref;
+        busData = {
+          id: toNumber(busSnapshot.docs[0].data().id, toNumber(busRef.id, 0) || busRef.id),
+          ...busSnapshot.docs[0].data(),
+          bus_type: busType,
+          capacity: parsedCapacity,
+          operator: busOperator,
+        };
+      }
+
+      let routeRef, routeData;
+      if (routeSnapshot.empty) {
+        routeRef = firestore.collection("routes").doc();
+        routeData = {
+          id: toNumber(routeRef.id, 0) || routeRef.id,
+          source: sourceCity,
+          destination: destinationCity,
+          distance_km: parsedDistance,
+          source_lower: toLowerText(sourceCity),
+          destination_lower: toLowerText(destinationCity),
+        };
+      } else {
+        routeRef = routeSnapshot.docs[0].ref;
+        routeData = {
+          id: toNumber(routeSnapshot.docs[0].data().id, toNumber(routeRef.id, 0) || routeRef.id),
+          ...routeSnapshot.docs[0].data(),
+          distance_km: parsedDistance || toNumber(routeSnapshot.docs[0].data().distance_km, 0),
+        };
+      }
+
+      const scheduleData = buildSearchableSchedule({
+        id: scheduleId,
+        bus: busData,
+        route: routeData,
+        route_doc_id: routeRef.id,
+        departure_time: departureTime,
+        arrival_time: arrivalTime,
+        fare: finalFare,
+        between_stop_rate: parsedBetweenStopRate,
+      });
+
+      const batch = firestore.batch();
+      batch.set(busRef, busData, { merge: true });
+      batch.set(routeRef, routeData, { merge: true });
+      batch.set(scheduleRef, scheduleData);
+
+      // Delete old stops and add new ones
+      if (scheduleData.route_doc_id) {
+        const oldStopsSnapshot = await firestore
+          .collection("route_stops")
+          .where("route_doc_id", "==", scheduleData.route_doc_id)
+          .get();
+        oldStopsSnapshot.docs.forEach((doc) => batch.delete(doc.ref));
+      }
+
+      stopList.forEach((stop) => {
+        const stopRef = firestore.collection("route_stops").doc();
+        batch.set(stopRef, {
+          ...stop,
+          segment_price: toNumber(stop.segment_price, 0),
+          route_id: routeData.id,
+          route_doc_id: routeRef.id,
+          source: routeData.source,
+          destination: routeData.destination,
+        });
+      });
+
+      await batch.commit();
+
+      return {
+        success: true,
+        message: "Schedule updated successfully",
+        schedule: {
+          ...scheduleData,
+          id: scheduleId,
         },
         stops: stopList,
       };

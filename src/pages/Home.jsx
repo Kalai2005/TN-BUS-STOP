@@ -31,6 +31,9 @@ export const Home = () => {
         busesFound: 'பஸ்கள் கண்டுபிடிக்கப்பட்டன',
         destinationViewPrefix: 'இலக்கிற்கு கிடைக்கும் பஸ்கள்',
         availability: 'நேரடி கிடைக்கும் நிலை',
+        betweenStops: 'இடை நிறுத்தங்கள்',
+        noBetweenStops: 'இடை நிறுத்தங்கள் இல்லை',
+        moreStops: 'மேலும்',
         nextDayArrival: 'அடுத்த நாள் வருகை',
         localBus: 'உள்ளூர் பஸ்',
         intercity: 'இடநகர்',
@@ -68,6 +71,9 @@ export const Home = () => {
         busesFound: 'Buses Found for',
         destinationViewPrefix: 'Available buses to',
         availability: 'Real-time availability',
+        betweenStops: 'Between Stops',
+        noBetweenStops: 'No between stops',
+        moreStops: 'more',
         nextDayArrival: 'Next day arrival',
         localBus: 'Local Bus',
         intercity: 'Intercity',
@@ -430,6 +436,8 @@ export const Home = () => {
             <AnimatePresence mode="popLayout">
               {results.map((bus, idx) => {
                 const journeyMeta = getJourneyMeta(bus.departure_time, bus.arrival_time);
+                const betweenStops = Array.isArray(bus.between_stops) ? bus.between_stops : [];
+                const stopsPreview = betweenStops.slice(0, 3);
 
                 return (
                   <motion.div 
@@ -485,6 +493,21 @@ export const Home = () => {
                               )}
                               <div className="stop-name">{bus.destination}</div>
                             </div>
+                          </div>
+                          <div className="between-stops-preview">
+                            <span className="between-stops-label">{text.betweenStops}:</span>
+                            {stopsPreview.length > 0 ? (
+                              <>
+                                <span className="between-stops-list">
+                                  {stopsPreview.map((stop) => stop.stop_name).join(' • ')}
+                                </span>
+                                {betweenStops.length > stopsPreview.length && (
+                                  <span className="between-stops-more">+{betweenStops.length - stopsPreview.length} {text.moreStops}</span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="between-stops-empty">{text.noBetweenStops}</span>
+                            )}
                           </div>
                       </div>
                       

@@ -146,7 +146,7 @@ export const MyBookings = () => {
   const activeBooking = selectedBooking
     ? {
         ...selectedBooking,
-        fare: selectedSchedule?.fare ?? selectedBooking.fare,
+        fare: selectedBooking.total_fare ?? selectedBooking.fare ?? selectedSchedule?.fare,
         distance_km: selectedSchedule?.distance_km ?? selectedBooking.distance_km,
         operator: selectedSchedule?.operator ?? selectedBooking.operator,
         bus_type: selectedSchedule?.bus_type ?? selectedBooking.bus_type,

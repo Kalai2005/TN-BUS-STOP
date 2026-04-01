@@ -220,3 +220,51 @@
       }
 .edit-btn { color: #a1a1aa; font-weight: 600; }
 .edit-btn:hover { color: #18181b; }
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: #a1a1aa;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s;
+}
+
+.delete-btn:hover {
+  color: #ef4444;
+}
+
+.delete-btn:disabled,
+.edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancel-btn {
+  background-color: #e4e4e7;
+  color: #18181b;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.cancel-btn:hover:not(:disabled) {
+  background-color: #d4d4d8;
+}
+
+.cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

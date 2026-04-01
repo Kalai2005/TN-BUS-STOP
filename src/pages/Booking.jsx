@@ -7,6 +7,17 @@ import { api } from '../services/api';
 import '../styles/Booking.css';
 import { useLanguage } from '../context/LanguageContext';
 
+const calculateDistanceStopFare = ({ distanceKm, stopCount, isLocalRoute }) => {
+  const config = isLocalRoute
+    ? { base: 4, perKm: 1.2, perStop: 0.8, min: 6 }
+    : { base: 20, perKm: 1.8, perStop: 1.5, min: 20 };
+
+  const safeDistance = Math.max(0, Number(distanceKm) || 0);
+  const safeStops = Math.max(2, Number(stopCount) || 2);
+  const fare = config.base + (safeDistance * config.perKm) + ((safeStops - 1) * config.perStop);
+  return Math.max(config.min, Math.round(fare));
+};
+
 export const Booking = () => {
   const { language } = useLanguage();
   const text = language === 'ta'
@@ -39,6 +50,12 @@ export const Booking = () => {
         waiting: 'காத்திருப்பு',
         refreshSeats: 'இருக்கை கிடைக்கும் நிலை புதுப்பிக்கப்படுகிறது...',
         localDetected: 'உள்ளூர் பஸ் சேவை கண்டறியப்பட்டது. ஏறும் போது இருக்கை ஒதுக்கப்படும்.',
+        selectLocalStops: 'உள்ளூர் பயணத்திற்கு ஏறும் மற்றும் இறங்கும் நிறுத்தத்தை தேர்வு செய்யவும்.',
+        boardingStop: 'ஏறும் நிறுத்தம்',
+        dropStop: 'இறங்கும் நிறுத்தம்',
+        ticketCount: 'டிக்கெட் எண்ணிக்கை',
+        invalidLocalStops: 'சரியான ஏறும் மற்றும் இறங்கும் நிறுத்தத்தை தேர்வு செய்யவும்.',
+        invalidTicketCount: 'குறைந்தது 1 மற்றும் அதிகபட்சம் 10 டிக்கெட் மட்டும் தேர்வு செய்யலாம்.',
         passengerDetails: 'பயணி விவரங்கள்',
         fullName: 'முழு பெயர்',
         age: 'வயது',
@@ -89,6 +106,12 @@ export const Booking = () => {
         waiting: 'Waiting',
         refreshSeats: 'Refreshing seat availability...',
         localDetected: 'Local bus service detected. Seat allocation happens at boarding, so seat selection is not required.',
+        selectLocalStops: 'Select boarding and drop stops for local route booking.',
+        boardingStop: 'Boarding Stop',
+        dropStop: 'Drop Stop',
+        ticketCount: 'Number of Tickets',
+        invalidLocalStops: 'Please select valid boarding and drop stops.',
+        invalidTicketCount: 'Ticket count must be between 1 and 10.',
         passengerDetails: 'Passenger Details',
         fullName: 'Full Name',
         age: 'Age',
@@ -130,6 +153,11 @@ export const Booking = () => {
   const [error, setError] = useState('');
   const [seatMessage, setSeatMessage] = useState(text.chooseSeat);
   const [routeStops, setRouteStops] = useState([]);
+  const [localTicketCount, setLocalTicketCount] = useState(1);
+  const [localTrip, setLocalTrip] = useState({
+    boardingStop: '',
+    dropStop: '',
+  });
 
   const formatTime = (value) => {
     if (!value) return 'N/A';
@@ -216,6 +244,7 @@ export const Booking = () => {
           departureTime: schedule.departure_time,
           arrivalTime: schedule.arrival_time,
           distanceKm: schedule.distance_km,
+          betweenStopRate: Number(schedule.between_stop_rate || 0),
           route: `${schedule.source} to ${schedule.destination}`,
           fare: Number(schedule.fare || 0),
           capacity: Number(schedule.capacity || 40),
@@ -253,8 +282,84 @@ export const Booking = () => {
 
   const totalSeats = busDetails?.capacity || 40;
   const isLocalBus = Boolean(busDetails?.isLocal);
-  const baseFare = Number(busDetails?.fare || 0);
-  const serviceFee = isLocalBus ? 1 : 25;
+  const routeStopOptions = React.useMemo(() => {
+    if (!busDetails) return [];
+
+    const seedStops = [
+      { stop_name: busDetails.source },
+      ...routeStops,
+      { stop_name: busDetails.destination },
+    ];
+
+    const deduped = [];
+    const seen = new Set();
+    seedStops.forEach((stop, index) => {
+      const stopName = String(stop?.stop_name || '').trim();
+      if (!stopName) return;
+      const key = stopName.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      deduped.push({
+        stop_name: stopName,
+        stop_order: Number(stop?.stop_order ?? index),
+        segment_price: Number(stop?.segment_price || 0),
+      });
+    });
+
+    return deduped;
+  }, [busDetails, routeStops]);
+
+  useEffect(() => {
+    if (!isLocalBus || !busDetails) {
+      return;
+    }
+
+    setLocalTrip((prev) => ({
+      boardingStop: prev.boardingStop || busDetails.source,
+      dropStop: prev.dropStop || busDetails.destination,
+    }));
+    setLocalTicketCount(1);
+  }, [isLocalBus, busDetails]);
+
+  const localBoardingIndex = routeStopOptions.findIndex(
+    (stop) => stop.stop_name.toLowerCase() === String(localTrip.boardingStop || '').toLowerCase()
+  );
+  const localDropIndex = routeStopOptions.findIndex(
+    (stop) => stop.stop_name.toLowerCase() === String(localTrip.dropStop || '').toLowerCase()
+  );
+  const isValidLocalTrip = !isLocalBus || (localBoardingIndex >= 0 && localDropIndex > localBoardingIndex);
+  const fullSegmentCount = Math.max(routeStopOptions.length - 1, 1);
+  const selectedSegmentCount = isValidLocalTrip ? Math.max(localDropIndex - localBoardingIndex, 1) : fullSegmentCount;
+  const localFareRatio = selectedSegmentCount / fullSegmentCount;
+  const estimatedDistanceKm = isLocalBus
+    ? Math.max(0, Number(busDetails?.distanceKm || 0)) * localFareRatio
+    : Math.max(0, Number(busDetails?.distanceKm || 0));
+  const estimatedStopCount = isLocalBus ? selectedSegmentCount + 1 : Math.max(routeStopOptions.length, 2);
+  const perTicketBaseFare = calculateDistanceStopFare({
+    distanceKm: estimatedDistanceKm,
+    stopCount: estimatedStopCount,
+    isLocalRoute: isLocalBus,
+  });
+  const fixedBetweenStopRate = Math.max(0, Number(busDetails?.betweenStopRate || 0));
+  const configuredSegmentPrices = routeStopOptions
+    .slice(0, Math.max(routeStopOptions.length - 1, 0))
+    .map((stop) => Number(stop.segment_price || 0));
+  const selectedSegmentFare = isValidLocalTrip
+    ? configuredSegmentPrices
+        .slice(localBoardingIndex, localDropIndex)
+        .reduce((sum, price) => sum + (Number(price) || 0), 0)
+    : 0;
+  const fixedPerTicketFare = Math.max(1, Math.round(
+    selectedSegmentFare > 0
+      ? selectedSegmentFare
+      : fixedBetweenStopRate * Math.max(selectedSegmentCount, 1)
+  ));
+  const resolvedPerTicketFare = (isLocalBus && fixedBetweenStopRate > 0)
+    ? fixedPerTicketFare
+    : perTicketBaseFare;
+  const ticketCount = isLocalBus ? localTicketCount : 1;
+  const baseFare = resolvedPerTicketFare * ticketCount;
+  const serviceFee = 0;
   const totalAmount = baseFare + serviceFee;
   const bookingDayOffset = getDayOffset(busDetails?.departureTime, busDetails?.arrivalTime);
   const ticketDownloadUrl = ticket?.qr_download_url || '';
@@ -279,6 +384,16 @@ export const Booking = () => {
 
       if (bookedSeats.includes(selectedSeat)) {
         return text.seatBooked;
+      }
+    }
+
+    if (isLocalBus) {
+      if (!isValidLocalTrip) {
+        return text.invalidLocalStops;
+      }
+
+      if (!Number.isInteger(Number(localTicketCount)) || Number(localTicketCount) < 1 || Number(localTicketCount) > 10) {
+        return text.invalidTicketCount;
       }
     }
 
@@ -342,6 +457,9 @@ export const Booking = () => {
       const data = await api.book({
         scheduleId: id,
         seatNumber: isLocalBus ? 'N/A' : selectedSeat,
+        ticketCount: isLocalBus ? Number(localTicketCount) : 1,
+        boardingStop: isLocalBus ? localTrip.boardingStop : null,
+        dropStop: isLocalBus ? localTrip.dropStop : null,
         passengerName: passenger.name.trim(),
         passengerAge: Number(passenger.age),
         passengerGender: passenger.gender,
@@ -497,7 +615,49 @@ export const Booking = () => {
                   <p className="seat-inline-note">{loadingSeats ? text.refreshSeats : seatMessage}</p>
                 </>
               ) : (
-                <div className="local-bus-note">{text.localDetected}</div>
+                <>
+                  <div className="local-bus-note">{text.localDetected}</div>
+                  <div className="passenger-details-form">
+                    <h3 className="section-label">{text.selectLocalStops}</h3>
+                    <div className="form-grid">
+                      <div className="form-group">
+                        <label className="input-label">{text.boardingStop}</label>
+                        <select
+                          value={localTrip.boardingStop}
+                          onChange={(event) => setLocalTrip((prev) => ({ ...prev, boardingStop: event.target.value }))}
+                          className="form-select"
+                        >
+                          {routeStopOptions.map((stop) => (
+                            <option key={`boarding-${stop.stop_name}`} value={stop.stop_name}>{stop.stop_name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label className="input-label">{text.dropStop}</label>
+                        <select
+                          value={localTrip.dropStop}
+                          onChange={(event) => setLocalTrip((prev) => ({ ...prev, dropStop: event.target.value }))}
+                          className="form-select"
+                        >
+                          {routeStopOptions.map((stop) => (
+                            <option key={`drop-${stop.stop_name}`} value={stop.stop_name}>{stop.stop_name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label className="input-label">{text.ticketCount}</label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="10"
+                          value={localTicketCount}
+                          onChange={(event) => setLocalTicketCount(Number(event.target.value || 1))}
+                          className="form-input"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </>
               )}
 
               <div className="passenger-details-form">
@@ -565,6 +725,12 @@ export const Booking = () => {
                   <span className="summary-label">{text.baseFare}</span>
                   <span className="summary-value">₹{baseFare}</span>
                 </div>
+                {isLocalBus && (
+                  <div className="summary-item">
+                    <span className="summary-label">{text.ticketCount}</span>
+                    <span className="summary-value">{ticketCount}</span>
+                  </div>
+                )}
                 <div className="summary-item">
                   <span className="summary-label">{text.serviceFee}</span>
                   <span className="summary-value">₹{serviceFee}</span>
@@ -644,7 +810,9 @@ export const Booking = () => {
           <div className="ticket-highlights-grid">
             <div className="highlight-item">
               <span className="highlight-label">Route</span>
-              <span className="highlight-value">{busDetails.source} {'->'} {busDetails.destination}</span>
+              <span className="highlight-value">
+                {isLocalBus ? (localTrip.boardingStop || busDetails.source) : busDetails.source} {'->'} {isLocalBus ? (localTrip.dropStop || busDetails.destination) : busDetails.destination}
+              </span>
             </div>
             <div className="highlight-item">
               <span className="highlight-label">Journey Time</span>
@@ -659,8 +827,14 @@ export const Booking = () => {
             </div>
             <div className="highlight-item highlight-item-accent">
               <span className="highlight-label">Amount Paid</span>
-              <span className="highlight-value">₹{totalAmount}</span>
+              <span className="highlight-value">₹{Number(ticket?.total_fare || totalAmount)}</span>
             </div>
+            {isLocalBus && (
+              <div className="highlight-item">
+                <span className="highlight-label">{text.ticketCount}</span>
+                <span className="highlight-value">{ticketCount}</span>
+              </div>
+            )}
           </div>
           
           <div className="qr-container">

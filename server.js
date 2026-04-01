@@ -37,6 +37,21 @@ const normalizeCity = (value = '') => {
 };
 
 const CANONICAL_LOCAL_BUS_NUMBER = "TN-30-L-7015";
+const ALLOWED_ADMIN_BUS_TYPES = new Set(["TNSTC", "KSRTC", "SETC", "Local buses"]);
+
+const FARE_CONFIG = {
+  local: { base: 4, perKm: 1.2, perStop: 0.8, min: 6 },
+  express: { base: 20, perKm: 1.8, perStop: 1.5, min: 20 },
+};
+
+const calculateDistanceStopFare = ({ distanceKm, stopCount, isLocalRoute }) => {
+  const config = isLocalRoute ? FARE_CONFIG.local : FARE_CONFIG.express;
+  const safeDistance = Math.max(0, Number(distanceKm) || 0);
+  const safeStops = Math.max(2, Number(stopCount) || 2);
+
+  const fare = config.base + (safeDistance * config.perKm) + ((safeStops - 1) * config.perStop);
+  return Math.max(config.min, Math.round(fare));
+};
 
 const toHHMM = (totalMinutes) => {
   const normalizedMinutes = ((totalMinutes % (24 * 60)) + (24 * 60)) % (24 * 60);
@@ -49,22 +64,27 @@ const parseStopEntry = (entry) => {
   if (entry && typeof entry === "object" && !Array.isArray(entry)) {
     const stopName = String(entry.stop_name || entry.name || "").trim();
     const stopTime = String(entry.stop_time || entry.time || "").trim();
+    const segmentPrice = Number(entry.segment_price);
     if (!stopName) return null;
     return {
       stop_name: stopName,
       stop_time: stopTime || null,
+      segment_price: Number.isFinite(segmentPrice) ? Math.max(0, segmentPrice) : 0,
     };
   }
 
   const raw = String(entry || "").trim();
   if (!raw) return null;
 
-  const [namePart, timePart] = raw.split("|").map((part) => String(part || "").trim());
+  const [namePart, timePart, pricePart] = raw.split("|").map((part) => String(part || "").trim());
   if (!namePart) return null;
+
+  const parsedPrice = Number(pricePart);
 
   return {
     stop_name: namePart,
     stop_time: timePart || null,
+    segment_price: Number.isFinite(parsedPrice) ? Math.max(0, parsedPrice) : 0,
   };
 };
 
@@ -192,9 +212,10 @@ const extractTicketQrCode = (inputValue) => {
 const getBookingByQrCodeSqlite = (qrCode) => {
   return db.prepare(`
     SELECT bk.id, bk.qr_code, bk.status, bk.booking_date, bk.seat_number,
+           bk.ticket_count, bk.boarding_stop, bk.drop_stop, bk.unit_fare, bk.total_fare,
            bk.passenger_name, bk.passenger_age, bk.passenger_gender,
            bk.physical_issued_at, bk.physical_issued_by, bk.boarded_at,
-           s.id AS schedule_id, s.departure_time, s.arrival_time, s.fare,
+           s.id AS schedule_id, s.departure_time, s.arrival_time, COALESCE(bk.total_fare, s.fare) AS fare,
            r.source, r.destination, r.distance_km,
            b.bus_number, b.bus_type, b.operator
     FROM bookings bk
@@ -222,41 +243,91 @@ const writeTicketPdfHeaders = (res, booking) => {
   res.setHeader("Content-Disposition", `attachment; filename="${getTicketPdfFileName(booking)}"`);
 };
 
-const generateTicketPdfBuffer = (booking) => {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    const doc = new PDFDocument({ size: "A5", margin: 36 });
+const generateTicketPdfBuffer = async (booking) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const chunks = [];
+      const doc = new PDFDocument({ size: "A5", margin: 36 });
 
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+      doc.on("data", (chunk) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
 
-    doc.fontSize(18).text("TN SMART BUS", { align: "center" });
-    doc.moveDown(0.3);
-    doc.fontSize(11).text("Digital Ticket", { align: "center" });
-    doc.moveDown(1);
+      doc.fontSize(18).text("TN SMART BUS", { align: "center" });
+      doc.moveDown(0.3);
+      doc.fontSize(11).text("Digital Ticket", { align: "center" });
+      doc.moveDown(1);
 
-    doc.fontSize(11);
-    doc.text(`Ticket ID: ${booking.qr_code || "N/A"}`);
-    doc.text(`Booking Ref: BK-${booking.id || "N/A"}`);
-    doc.text(`Passenger: ${booking.passenger_name || "N/A"}`);
-    doc.text(`Age / Gender: ${booking.passenger_age || "N/A"} / ${booking.passenger_gender || "N/A"}`);
-    doc.text(`Route: ${booking.source || "N/A"} -> ${booking.destination || "N/A"}`);
-    doc.text(`Departure: ${booking.departure_time || "N/A"}`);
-    doc.text(`Arrival: ${booking.arrival_time || "N/A"}`);
-    doc.text(`Seat: ${booking.seat_number || "N/A"}`);
-    doc.text(`Bus: ${booking.bus_number || "N/A"}`);
-    doc.text(`Operator: ${booking.operator || "N/A"}`);
-    doc.text(`Fare: INR ${Number(booking.fare || 0)}`);
-    doc.text(`Booked On: ${formatDateTime(booking.booking_date)}`);
-    doc.text(`Status: ${booking.status || "N/A"}`);
+      // Fetch QR code from external API
+      const qrData = JSON.stringify({
+        ticketId: booking.qr_code,
+        bookingRef: `BK-${booking.id}`,
+        passengerName: booking.passenger_name,
+        busNumber: booking.bus_number,
+        source: booking.source,
+        destination: booking.destination,
+        boardingStop: booking.boarding_stop,
+        dropStop: booking.drop_stop,
+        departureTime: booking.departure_time,
+        seatNumber: booking.seat_number,
+        ticketCount: booking.ticket_count,
+      });
 
-    doc.moveDown(1);
-    doc.fontSize(9).fillColor("#555").text("Prototype ticket. Please show this ticket and valid ID while boarding.", {
-      align: "left",
-    });
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
+      console.log(`[QR] Fetching QR code from: ${qrUrl}`);
 
-    doc.end();
+      let qrImage = null;
+      try {
+        const qrResponse = await fetch(qrUrl);
+        if (qrResponse.ok) {
+          qrImage = await qrResponse.buffer();
+          console.log(`[QR] Successfully fetched QR code (${qrImage.length} bytes)`);
+        } else {
+          console.warn(`[QR] Failed to fetch QR code: ${qrResponse.status}`);
+        }
+      } catch (fetchError) {
+        console.warn(`[QR] Error fetching QR code:`, fetchError.message);
+      }
+
+      // Add QR code to PDF if available
+      if (qrImage) {
+        doc.image(qrImage, {
+          align: "center",
+          width: 150
+        });
+        doc.moveDown(0.5);
+      }
+
+      doc.fontSize(11);
+      const boardingStop = booking.boarding_stop || booking.source || "N/A";
+      const destinationStop = booking.drop_stop || booking.destination || "N/A";
+      doc.text(`Ticket ID: ${booking.qr_code || "N/A"}`);
+      doc.text(`Booking Ref: BK-${booking.id || "N/A"}`);
+      doc.text(`Passenger: ${booking.passenger_name || "N/A"}`);
+      doc.text(`Age / Gender: ${booking.passenger_age || "N/A"} / ${booking.passenger_gender || "N/A"}`);
+      doc.text(`Booked Route: ${boardingStop} -> ${destinationStop}`);
+      doc.text(`Boarding Stop: ${boardingStop}`);
+      doc.text(`Drop Stop: ${destinationStop}`);
+      doc.text(`Departure: ${booking.departure_time || "N/A"}`);
+      doc.text(`Arrival: ${booking.arrival_time || "N/A"}`);
+      doc.text(`Seat: ${booking.seat_number || "N/A"}`);
+      doc.text(`Tickets: ${Number(booking.ticket_count || 1)}`);
+      doc.text(`Bus: ${booking.bus_number || "N/A"}`);
+      doc.text(`Operator: ${booking.operator || "N/A"}`);
+      doc.text(`Fare: INR ${Number(booking.fare || 0)}`);
+      doc.text(`Booked On: ${formatDateTime(booking.booking_date)}`);
+      doc.text(`Status: ${booking.status || "N/A"}`);
+
+      doc.moveDown(1);
+      doc.fontSize(9).fillColor("#555").text("Prototype ticket. Please show this ticket with QR code and valid ID while boarding.", {
+        align: "left",
+      });
+
+      doc.end();
+    } catch (error) {
+      console.error(`[PDF] Error generating ticket PDF:`, error);
+      reject(error);
+    }
   });
 };
 
@@ -266,25 +337,35 @@ const sendTicketPdfBuffer = (res, booking, pdfBuffer) => {
 };
 
 const streamTicketPdf = async (res, booking) => {
-  const pdfBuffer = await generateTicketPdfBuffer(booking);
-  sendTicketPdfBuffer(res, booking, pdfBuffer);
+  try {
+    const pdfBuffer = await generateTicketPdfBuffer(booking);
+    sendTicketPdfBuffer(res, booking, pdfBuffer);
+  } catch (error) {
+    console.error(`[PDF] Error streaming ticket:`, error);
+    res.status(500).json({ success: false, message: "Failed to generate ticket PDF" });
+  }
 };
 
 const persistFirestoreTicketPdfIfPossible = async (store, qrCode, booking) => {
   if (!store?.uploadTicketPdfByQrCode || !booking) return { success: false };
 
-  const pdfBuffer = await generateTicketPdfBuffer(booking);
-  const saveResult = await store.uploadTicketPdfByQrCode({
-    qr_code: qrCode,
-    pdf_buffer: pdfBuffer,
-    file_name: getTicketPdfFileName(booking),
-  });
+  try {
+    const pdfBuffer = await generateTicketPdfBuffer(booking);
+    const saveResult = await store.uploadTicketPdfByQrCode({
+      qr_code: qrCode,
+      pdf_buffer: pdfBuffer,
+      file_name: getTicketPdfFileName(booking),
+    });
 
-  return {
-    success: Boolean(saveResult?.success),
-    downloadUrl: saveResult?.downloadUrl || "",
-    message: saveResult?.message || "",
-  };
+    return {
+      success: Boolean(saveResult?.success),
+      downloadUrl: saveResult?.downloadUrl || "",
+      message: saveResult?.message || "",
+    };
+  } catch (error) {
+    console.error(`[Firestore] Error persisting ticket PDF:`, error);
+    return { success: false, message: error.message };
+  }
 };
 
 const listenWithPortFallback = (app, startPort, host = "0.0.0.0", maxRetries = 10) =>
@@ -339,6 +420,7 @@ db.exec(`
     departure_time TEXT,
     arrival_time TEXT,
     fare REAL,
+    between_stop_rate REAL,
     FOREIGN KEY(bus_id) REFERENCES buses(id),
     FOREIGN KEY(route_id) REFERENCES routes(id)
   );
@@ -349,6 +431,7 @@ db.exec(`
     stop_name TEXT,
     stop_order INTEGER,
     stop_time TEXT,
+    segment_price REAL,
     FOREIGN KEY(route_id) REFERENCES routes(id)
   );
 
@@ -357,6 +440,11 @@ db.exec(`
     user_id INTEGER,
     schedule_id INTEGER,
     seat_number TEXT,
+    ticket_count INTEGER DEFAULT 1,
+    boarding_stop TEXT,
+    drop_stop TEXT,
+    unit_fare REAL,
+    total_fare REAL,
     booking_date TEXT,
     status TEXT DEFAULT 'confirmed',
     qr_code TEXT,
@@ -375,9 +463,16 @@ db.exec(`
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_name TEXT;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_age INTEGER;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN passenger_gender TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN ticket_count INTEGER DEFAULT 1;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN boarding_stop TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN drop_stop TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN unit_fare REAL;"); } catch(e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN total_fare REAL;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN physical_issued_at TEXT;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN physical_issued_by TEXT;"); } catch(e) {}
 try { db.exec("ALTER TABLE bookings ADD COLUMN boarded_at TEXT;"); } catch(e) {}
+try { db.exec("ALTER TABLE schedules ADD COLUMN between_stop_rate REAL;"); } catch(e) {}
+try { db.exec("ALTER TABLE route_stops ADD COLUMN segment_price REAL;"); } catch(e) {}
 
 // Seed Data (if empty)
 const routeCount = db.prepare("SELECT count(*) as count FROM routes").get();
@@ -536,6 +631,13 @@ const addLocalData = () => {
     )
   `);
 
+  const clearOldLocalRouteStops = db.prepare(`
+    DELETE FROM route_stops
+    WHERE route_id IN (
+      SELECT id FROM routes WHERE source = ? AND destination = ?
+    )
+  `);
+
   const clearOldLocalRoute = db.prepare("DELETE FROM routes WHERE source = ? AND destination = ?");
 
   const clearLegacyStopBookings = db.prepare(`
@@ -555,10 +657,18 @@ const addLocalData = () => {
     )
   `);
 
+  const clearLegacyStopRouteStops = db.prepare(`
+    DELETE FROM route_stops
+    WHERE route_id IN (
+      SELECT id FROM routes WHERE source = ? OR destination = ?
+    )
+  `);
+
   const clearLegacyStopRoutes = db.prepare("DELETE FROM routes WHERE source = ? OR destination = ?");
 
   oldLocalRoutes.forEach(([source, destination]) => {
     clearOldLocalBookings.run(source, destination);
+    clearOldLocalRouteStops.run(source, destination);
     clearOldLocalSchedules.run(source, destination);
     clearOldLocalRoute.run(source, destination);
   });
@@ -568,6 +678,7 @@ const addLocalData = () => {
     localStopNames.forEach(destination => {
       if (source === destination) return;
       clearOldLocalBookings.run(source, destination);
+      clearOldLocalRouteStops.run(source, destination);
       clearOldLocalSchedules.run(source, destination);
       clearOldLocalRoute.run(source, destination);
     });
@@ -576,6 +687,7 @@ const addLocalData = () => {
   
   ["Erode bus stand"].forEach((legacyStop) => {
     clearLegacyStopBookings.run(legacyStop, legacyStop);
+    clearLegacyStopRouteStops.run(legacyStop, legacyStop);
     clearLegacyStopSchedules.run(legacyStop, legacyStop);
     clearLegacyStopRoutes.run(legacyStop, legacyStop);
   });
@@ -834,6 +946,20 @@ async function startServer() {
 
   app.use(express.json());
 
+  // VERY FIRST MIDDLEWARE - log ALL requests
+  app.use((req, res, next) => {
+    console.log(`\n[FIRST-MIDDLEWARE] ${req.method} ${req.path} (${req.originalUrl})`);
+    next();
+  });
+
+  // Debug middleware to log DELETE admin requests
+  app.use((req, res, next) => {
+    if (req.method === 'DELETE' && req.path.includes('admin')) {
+      console.log(`\n[DELETE-MIDDLEWARE] DELETE to admin route: ${req.path}`);
+    }
+    next();
+  });
+
   console.log(`Data mode: ${firestoreStore.mode}. ${firestoreStore.reason}`);
 
   
@@ -877,7 +1003,22 @@ async function startServer() {
       ORDER BY s.departure_time ASC
     `;
     const results = db.prepare(query).all(`%${source}%`, `%${destination}%`);
-    res.json(results);
+    const enrichedResults = results.map((item) => {
+      const stops = db.prepare(`
+        SELECT stop_name, stop_time, stop_order, COALESCE(segment_price, 0) AS segment_price
+        FROM route_stops
+        WHERE route_id = ?
+        ORDER BY stop_order ASC, id ASC
+      `).all(item.route_id);
+
+      return {
+        ...item,
+        between_stops: stops,
+        stops_count: stops.length,
+      };
+    });
+
+    res.json(enrichedResults);
   });
 
   app.get("/api/schedules/:id", async (req, res) => {
@@ -896,7 +1037,7 @@ async function startServer() {
     }
 
     const query = `
-      SELECT s.id, s.departure_time, s.arrival_time, s.fare,
+      SELECT s.id, s.departure_time, s.arrival_time, s.fare, COALESCE(s.between_stop_rate, 0) AS between_stop_rate,
              b.bus_number, b.bus_type, b.operator, b.capacity,
              r.source, r.destination, r.distance_km
       FROM schedules s
@@ -954,7 +1095,7 @@ async function startServer() {
     }
 
     const stops = db.prepare(`
-      SELECT id, stop_name, stop_time, stop_order
+      SELECT id, stop_name, stop_time, stop_order, COALESCE(segment_price, 0) AS segment_price
       FROM route_stops
       WHERE route_id = ?
       ORDER BY stop_order ASC, id ASC
@@ -964,7 +1105,17 @@ async function startServer() {
   });
 
   app.post("/api/bookings", async (req, res) => {
-    const { user_id, schedule_id, seat_number, passenger_name, passenger_age, passenger_gender } = req.body;
+    const {
+      user_id,
+      schedule_id,
+      seat_number,
+      passenger_name,
+      passenger_age,
+      passenger_gender,
+      boarding_stop,
+      drop_stop,
+      ticket_count,
+    } = req.body;
 
     if (!schedule_id || !passenger_name || !passenger_age || !passenger_gender) {
       res.status(400).json({ success: false, message: "Missing required booking fields" });
@@ -979,6 +1130,9 @@ async function startServer() {
         passenger_name,
         passenger_age,
         passenger_gender,
+        boarding_stop,
+        drop_stop,
+        ticket_count,
       });
 
       if (!bookingResult.success) {
@@ -1020,9 +1174,10 @@ async function startServer() {
 
     const scheduleInfo = db
       .prepare(
-        `SELECT s.id, b.bus_type
+        `SELECT s.id, s.route_id, s.between_stop_rate, b.bus_type, r.source, r.destination, r.distance_km
          FROM schedules s
          JOIN buses b ON s.bus_id = b.id
+         JOIN routes r ON s.route_id = r.id
          WHERE s.id = ?`
       )
       .get(schedule_id);
@@ -1033,11 +1188,149 @@ async function startServer() {
     }
 
     const isLocalRoute = String(scheduleInfo.bus_type || '').toLowerCase().includes('local');
+    const parsedTicketCount = Number.isInteger(Number(ticket_count)) ? Number(ticket_count) : 1;
+
+    if (parsedTicketCount < 1 || parsedTicketCount > 10) {
+      res.status(400).json({ success: false, message: "ticket_count must be between 1 and 10" });
+      return;
+    }
 
     if (!isLocalRoute && !seat_number) {
       res.status(400).json({ success: false, message: "Seat number is required for this bus" });
       return;
     }
+
+    let finalBoardingStop = null;
+    let finalDropStop = null;
+    let routeStopCount = 2;
+    let segmentStopCount = 2;
+    let segmentDistanceKm = Number(scheduleInfo.distance_km || 0);
+
+    if (isLocalRoute) {
+      const routeStops = db.prepare(`
+        SELECT stop_name, stop_order, COALESCE(segment_price, 0) AS segment_price
+        FROM route_stops
+        WHERE route_id = ?
+        ORDER BY stop_order ASC, id ASC
+      `).all(scheduleInfo.route_id);
+
+      const fullRouteStops = [
+        { stop_name: scheduleInfo.source },
+        ...routeStops,
+        { stop_name: scheduleInfo.destination },
+      ];
+
+      const dedupedStops = [];
+      const seen = new Set();
+      fullRouteStops.forEach((stop) => {
+        const stopName = String(stop.stop_name || "").trim();
+        if (!stopName) return;
+        const key = stopName.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        dedupedStops.push(stopName);
+      });
+
+      const requestedBoarding = String(boarding_stop || "").trim() || scheduleInfo.source;
+      const requestedDrop = String(drop_stop || "").trim() || scheduleInfo.destination;
+      const boardingIndex = dedupedStops.findIndex((stopName) => stopName.toLowerCase() === requestedBoarding.toLowerCase());
+      const dropIndex = dedupedStops.findIndex((stopName) => stopName.toLowerCase() === requestedDrop.toLowerCase());
+
+      if (boardingIndex === -1 || dropIndex === -1 || boardingIndex >= dropIndex) {
+        res.status(400).json({ success: false, message: "Invalid local boarding/drop stops" });
+        return;
+      }
+
+      finalBoardingStop = dedupedStops[boardingIndex];
+      finalDropStop = dedupedStops[dropIndex];
+      routeStopCount = Math.max(dedupedStops.length, 2);
+      segmentStopCount = Math.max((dropIndex - boardingIndex) + 1, 2);
+
+      const totalSegments = Math.max(routeStopCount - 1, 1);
+      const segmentRatio = Math.min(1, Math.max(1 / totalSegments, (segmentStopCount - 1) / totalSegments));
+      segmentDistanceKm = Math.max(0, Number(scheduleInfo.distance_km || 0)) * segmentRatio;
+
+      const fallbackSegmentRate = Math.max(0, Number(scheduleInfo.between_stop_rate) || 0);
+      const orderedStops = [
+        { stop_name: scheduleInfo.source },
+        ...routeStops,
+        { stop_name: scheduleInfo.destination },
+      ];
+      const segmentPrices = [];
+      for (let segmentIndex = 0; segmentIndex < orderedStops.length - 1; segmentIndex += 1) {
+        const fromRouteStop = routeStops[segmentIndex];
+        const configuredPrice = Number(fromRouteStop?.segment_price || 0);
+        segmentPrices.push(configuredPrice > 0 ? configuredPrice : fallbackSegmentRate);
+      }
+
+      const selectedPrices = segmentPrices.slice(boardingIndex, dropIndex);
+      const summedSegmentFare = selectedPrices.reduce((sum, price) => sum + Number(price || 0), 0);
+
+      if (summedSegmentFare > 0) {
+        segmentDistanceKm = 0;
+        const segmentBasedUnitFare = Math.max(1, Math.round(summedSegmentFare));
+        const totalFare = segmentBasedUnitFare * parsedTicketCount;
+        const qr_code = `TICKET-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+        const info = db.prepare(`
+      INSERT INTO bookings (
+        user_id,
+        schedule_id,
+        seat_number,
+        ticket_count,
+        boarding_stop,
+        drop_stop,
+        unit_fare,
+        total_fare,
+        booking_date,
+        qr_code,
+        passenger_name,
+        passenger_age,
+        passenger_gender
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+          user_id || 1,
+          schedule_id,
+          "N/A",
+          parsedTicketCount,
+          finalBoardingStop,
+          finalDropStop,
+          segmentBasedUnitFare,
+          totalFare,
+          new Date().toISOString(),
+          qr_code,
+          passenger_name,
+          passenger_age,
+          passenger_gender
+        );
+        res.json({
+          success: true,
+          bookingId: info.lastInsertRowid,
+          qr_code,
+          unit_fare: segmentBasedUnitFare,
+          total_fare: totalFare,
+          qr_download_url: createTicketPdfUrl(req, qr_code),
+        });
+        return;
+      }
+    } else {
+      const routeStops = db.prepare(`
+        SELECT id
+        FROM route_stops
+        WHERE route_id = ?
+      `).all(scheduleInfo.route_id);
+      routeStopCount = Math.max((routeStops?.length || 0) + 2, 2);
+      segmentStopCount = routeStopCount;
+    }
+
+    const fixedBetweenStopRate = Math.max(0, Number(scheduleInfo.between_stop_rate) || 0);
+    const unitFare = (isLocalRoute && fixedBetweenStopRate > 0)
+      ? Math.max(1, Math.round(fixedBetweenStopRate * Math.max(segmentStopCount - 1, 1)))
+      : calculateDistanceStopFare({
+          distanceKm: segmentDistanceKm,
+          stopCount: segmentStopCount,
+          isLocalRoute,
+        });
+    const totalFare = unitFare * parsedTicketCount;
 
     const finalSeatNumber = isLocalRoute ? "N/A" : seat_number;
 
@@ -1055,12 +1348,43 @@ async function startServer() {
     }
 
     const qr_code = `TICKET-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    const info = db.prepare("INSERT INTO bookings (user_id, schedule_id, seat_number, booking_date, qr_code, passenger_name, passenger_age, passenger_gender) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(user_id || 1, schedule_id, finalSeatNumber, new Date().toISOString(), qr_code, passenger_name, passenger_age, passenger_gender);
+    const info = db.prepare(`
+      INSERT INTO bookings (
+        user_id,
+        schedule_id,
+        seat_number,
+        ticket_count,
+        boarding_stop,
+        drop_stop,
+        unit_fare,
+        total_fare,
+        booking_date,
+        qr_code,
+        passenger_name,
+        passenger_age,
+        passenger_gender
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      user_id || 1,
+      schedule_id,
+      finalSeatNumber,
+      parsedTicketCount,
+      finalBoardingStop,
+      finalDropStop,
+      unitFare,
+      totalFare,
+      new Date().toISOString(),
+      qr_code,
+      passenger_name,
+      passenger_age,
+      passenger_gender
+    );
     res.json({
       success: true,
       bookingId: info.lastInsertRowid,
       qr_code,
+      unit_fare: unitFare,
+      total_fare: totalFare,
       qr_download_url: createTicketPdfUrl(req, qr_code),
     });
   });
@@ -1085,12 +1409,6 @@ async function startServer() {
 
       if (result.booking.status !== "confirmed") {
         res.status(409).json({ success: false, message: `Ticket is ${result.booking.status}` });
-        return;
-      }
-
-      const existingStorageUrl = String(result.booking.ticket_pdf_download_url || "").trim();
-      if (existingStorageUrl) {
-        res.redirect(existingStorageUrl);
         return;
       }
 
@@ -1130,7 +1448,7 @@ async function startServer() {
     }
 
     const query = `
-        SELECT bk.*, s.departure_time, s.arrival_time, s.fare, r.source, r.destination, r.distance_km,
+        SELECT bk.*, s.departure_time, s.arrival_time, COALESCE(bk.total_fare, s.fare) AS fare, r.source, r.destination, r.distance_km,
           b.bus_number, b.bus_type, b.operator,
              bk.passenger_name, bk.passenger_age, bk.passenger_gender
       FROM bookings bk
@@ -1236,9 +1554,10 @@ async function startServer() {
     const issuePhysicalTicketTx = db.transaction((id, issuer) => {
       const existing = db.prepare(`
         SELECT bk.id, bk.qr_code, bk.status, bk.booking_date, bk.seat_number,
-               bk.passenger_name, bk.passenger_age, bk.passenger_gender,
+           bk.ticket_count, bk.boarding_stop, bk.drop_stop, bk.unit_fare, bk.total_fare,
+           bk.passenger_name, bk.passenger_age, bk.passenger_gender,
                bk.physical_issued_at, bk.physical_issued_by,
-               s.id AS schedule_id, s.departure_time, s.arrival_time, s.fare,
+           s.id AS schedule_id, s.departure_time, s.arrival_time, COALESCE(bk.total_fare, s.fare) AS fare,
                r.source, r.destination,
                b.bus_number, b.bus_type, b.operator
         FROM bookings bk
@@ -1299,6 +1618,11 @@ async function startServer() {
           departure_time: existing.departure_time,
           arrival_time: existing.arrival_time,
           fare: existing.fare,
+          ticket_count: existing.ticket_count,
+          boarding_stop: existing.boarding_stop,
+          drop_stop: existing.drop_stop,
+          unit_fare: existing.unit_fare,
+          total_fare: existing.total_fare,
           seat_number: existing.seat_number,
           passenger_name: existing.passenger_name,
           passenger_age: existing.passenger_age,
@@ -1332,7 +1656,7 @@ async function startServer() {
     const stats = {
       totalBuses: db.prepare("SELECT count(*) as count FROM buses").get(),
       totalBookings: db.prepare("SELECT count(*) as count FROM bookings").get(),
-      revenue: db.prepare("SELECT sum(s.fare) as total FROM bookings bk JOIN schedules s ON bk.schedule_id = s.id").get()
+      revenue: db.prepare("SELECT sum(COALESCE(bk.total_fare, s.fare)) as total FROM bookings bk JOIN schedules s ON bk.schedule_id = s.id").get()
     };
     res.json(stats);
   });
@@ -1347,7 +1671,7 @@ async function startServer() {
     }
 
     const schedules = db.prepare(`
-      SELECT s.id, s.departure_time, s.arrival_time, s.fare,
+      SELECT s.id, s.departure_time, s.arrival_time, s.fare, s.between_stop_rate,
              b.bus_number, b.bus_type, b.operator, b.capacity,
              r.id AS route_id, r.source, r.destination, r.distance_km,
              (SELECT count(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stops_count
@@ -1358,7 +1682,25 @@ async function startServer() {
       LIMIT ?
     `).all(limit);
 
+    console.log(`[GET /api/admin/schedules] Returned ${schedules.length} schedules with IDs:`, schedules.map(s => s.id));
     res.json(schedules);
+  });
+
+  // Debug endpoint - show all available schedules
+  app.get("/api/admin/debug/schedules", async (req, res) => {
+    if (firestoreStore.enabled) {
+      res.json({ mode: 'firestore', note: 'Check Firestore console' });
+      return;
+    }
+
+    const schedules = db.prepare("SELECT id FROM schedules ORDER BY id DESC").all();
+    console.log("[DEBUG] All schedules in DB:", schedules);
+    res.json({ 
+      mode: 'sqlite',
+      totalCount: schedules.length,
+      ids: schedules.map(s => s.id),
+      message: `There are ${schedules.length} schedules in the database`
+    });
   });
 
   app.post("/api/admin/buses", async (req, res) => {
@@ -1373,6 +1715,7 @@ async function startServer() {
       departure_time,
       arrival_time,
       fare,
+      between_stop_rate,
       stops,
     } = req.body || {};
 
@@ -1386,10 +1729,27 @@ async function startServer() {
     const parsedCapacity = Math.max(1, Number(capacity) || 40);
     const parsedDistance = Math.max(0, Number(distance_km) || 0);
     const parsedFare = Math.max(0, Number(fare) || 0);
+    const parsedBetweenStopRate = Math.max(0, Number(between_stop_rate) || 0);
     const stopList = parseStopsInput(stops);
+    const computedStopCount = Math.max(stopList.length + 2, 2);
+    const finalFare = parsedFare > 0
+      ? parsedFare
+      : calculateDistanceStopFare({
+          distanceKm: parsedDistance,
+          stopCount: computedStopCount,
+          isLocalRoute: String(busType).toLowerCase().includes("local"),
+        });
 
     if (!busNumber || !busType || !busOperator || !sourceCity || !destinationCity || !departureTime || !arrivalTime) {
       res.status(400).json({ success: false, message: "Missing required fields" });
+      return;
+    }
+
+    if (!ALLOWED_ADMIN_BUS_TYPES.has(busType)) {
+      res.status(400).json({
+        success: false,
+        message: "bus_type must be one of: TNSTC, KSRTC, SETC, Local buses",
+      });
       return;
     }
 
@@ -1404,7 +1764,8 @@ async function startServer() {
         distance_km: parsedDistance,
         departure_time: departureTime,
         arrival_time: arrivalTime,
-        fare: parsedFare,
+        fare: finalFare,
+        between_stop_rate: parsedBetweenStopRate,
         stops,
       });
 
@@ -1451,17 +1812,17 @@ async function startServer() {
       }
 
       const scheduleInsert = db
-        .prepare("INSERT INTO schedules (bus_id, route_id, departure_time, arrival_time, fare) VALUES (?, ?, ?, ?, ?)")
-        .run(bus.id, route.id, departureTime, arrivalTime, parsedFare);
+        .prepare("INSERT INTO schedules (bus_id, route_id, departure_time, arrival_time, fare, between_stop_rate) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(bus.id, route.id, departureTime, arrivalTime, finalFare, parsedBetweenStopRate);
 
       db.prepare("DELETE FROM route_stops WHERE route_id = ?").run(route.id);
-      const stopInsert = db.prepare("INSERT INTO route_stops (route_id, stop_name, stop_order, stop_time) VALUES (?, ?, ?, ?)");
+      const stopInsert = db.prepare("INSERT INTO route_stops (route_id, stop_name, stop_order, stop_time, segment_price) VALUES (?, ?, ?, ?, ?)");
       stopList.forEach((stop) => {
-        stopInsert.run(route.id, stop.stop_name, stop.stop_order, stop.stop_time);
+        stopInsert.run(route.id, stop.stop_name, stop.stop_order, stop.stop_time, Number(stop.segment_price || 0));
       });
 
       const schedule = db.prepare(`
-        SELECT s.id, s.departure_time, s.arrival_time, s.fare,
+        SELECT s.id, s.departure_time, s.arrival_time, s.fare, s.between_stop_rate,
                b.bus_number, b.bus_type, b.operator, b.capacity,
                r.source, r.destination, r.distance_km
         FROM schedules s
@@ -1488,8 +1849,281 @@ async function startServer() {
     res.status(201).json({ success: true, ...result });
   });
 
+  app.put("/api/admin/schedules/:id", async (req, res) => {
+    try {
+      const scheduleId = String(req.params?.id || "").trim();
+      const {
+        bus_number,
+        bus_type,
+        operator,
+        capacity,
+        source,
+        destination,
+        distance_km,
+        departure_time,
+        arrival_time,
+        fare,
+        between_stop_rate,
+        stops,
+      } = req.body || {};
+
+      if (!scheduleId) {
+        res.status(400).json({ success: false, message: "Schedule ID is required" });
+        return;
+      }
+
+      const busNumber = String(bus_number || "").trim();
+      const busType = String(bus_type || "").trim();
+      const busOperator = String(operator || "").trim();
+      const sourceCity = String(source || "").trim();
+      const destinationCity = String(destination || "").trim();
+      const departureTime = String(departure_time || "").trim();
+      const arrivalTime = String(arrival_time || "").trim();
+      const parsedCapacity = Math.max(1, Number(capacity) || 40);
+      const parsedDistance = Math.max(0, Number(distance_km) || 0);
+      const parsedFare = Math.max(0, Number(fare) || 0);
+      const parsedBetweenStopRate = Math.max(0, Number(between_stop_rate) || 0);
+      const stopList = parseStopsInput(stops);
+      const computedStopCount = Math.max(stopList.length + 2, 2);
+      const finalFare = parsedFare > 0
+        ? parsedFare
+        : calculateDistanceStopFare({
+            distanceKm: parsedDistance,
+            stopCount: computedStopCount,
+            isLocalRoute: String(busType).toLowerCase().includes("local"),
+          });
+
+      if (!busNumber || !busType || !busOperator || !sourceCity || !destinationCity || !departureTime || !arrivalTime) {
+        res.status(400).json({ success: false, message: "Missing required fields" });
+        return;
+      }
+
+      if (!ALLOWED_ADMIN_BUS_TYPES.has(busType)) {
+        res.status(400).json({
+          success: false,
+          message: "bus_type must be one of: TNSTC, KSRTC, SETC, Local buses",
+        });
+        return;
+      }
+
+      if (firestoreStore.enabled) {
+        const result = await firestoreStore.updateSchedule(scheduleId, {
+          bus_number: busNumber,
+          bus_type: busType,
+          operator: busOperator,
+          capacity: parsedCapacity,
+          source: sourceCity,
+          destination: destinationCity,
+          distance_km: parsedDistance,
+          departure_time: departureTime,
+          arrival_time: arrivalTime,
+          fare: finalFare,
+          between_stop_rate: parsedBetweenStopRate,
+          stops,
+        });
+
+        if (!result.success) {
+          res.status(result.statusCode || 400).json(result);
+          return;
+        }
+
+        res.json(result);
+        return;
+      }
+
+      // For SQLite, convert string ID to number
+      const numericId = Number(scheduleId);
+      if (!Number.isFinite(numericId) || numericId <= 0) {
+        res.status(400).json({ success: false, message: "Invalid schedule ID" });
+        return;
+      }
+
+      const updateSchedule = db.transaction((id) => {
+        const existing = db.prepare(`
+          SELECT s.id, s.bus_id, s.route_id
+          FROM schedules s
+          WHERE s.id = ?
+          LIMIT 1
+        `).get(id);
+
+        if (!existing) {
+          return { success: false, statusCode: 404, message: "Schedule not found" };
+        }
+
+        let bus = db.prepare("SELECT id FROM buses WHERE bus_number = ?").get(busNumber);
+        if (!bus) {
+          const busInsert = db
+            .prepare("INSERT INTO buses (bus_number, bus_type, capacity, operator) VALUES (?, ?, ?, ?)")
+            .run(busNumber, busType, parsedCapacity, busOperator);
+          bus = { id: Number(busInsert.lastInsertRowid) };
+        } else {
+          db.prepare("UPDATE buses SET bus_type = ?, capacity = ?, operator = ? WHERE id = ?")
+            .run(busType, parsedCapacity, busOperator, bus.id);
+        }
+
+        let route = db.prepare("SELECT id FROM routes WHERE source = ? AND destination = ? LIMIT 1").get(sourceCity, destinationCity);
+        if (!route) {
+          const routeInsert = db
+            .prepare("INSERT INTO routes (source, destination, distance_km) VALUES (?, ?, ?)")
+            .run(sourceCity, destinationCity, parsedDistance);
+          route = { id: Number(routeInsert.lastInsertRowid) };
+        } else {
+          db.prepare("UPDATE routes SET distance_km = ? WHERE id = ?").run(parsedDistance, route.id);
+        }
+
+        db.prepare("UPDATE schedules SET bus_id = ?, route_id = ?, departure_time = ?, arrival_time = ?, fare = ?, between_stop_rate = ? WHERE id = ?")
+          .run(bus.id, route.id, departureTime, arrivalTime, finalFare, parsedBetweenStopRate, id);
+
+        db.prepare("DELETE FROM route_stops WHERE route_id = ?").run(route.id);
+        const stopInsert = db.prepare("INSERT INTO route_stops (route_id, stop_name, stop_order, stop_time, segment_price) VALUES (?, ?, ?, ?, ?)");
+        stopList.forEach((stop) => {
+          stopInsert.run(route.id, stop.stop_name, stop.stop_order, stop.stop_time, Number(stop.segment_price || 0));
+        });
+
+        const schedule = db.prepare(`
+          SELECT s.id, s.departure_time, s.arrival_time, s.fare, s.between_stop_rate,
+                 b.bus_number, b.bus_type, b.operator, b.capacity,
+                 r.source, r.destination, r.distance_km
+          FROM schedules s
+          JOIN buses b ON s.bus_id = b.id
+          JOIN routes r ON s.route_id = r.id
+          WHERE s.id = ?
+          LIMIT 1
+        `).get(id);
+
+        return {
+          success: true,
+          message: "Schedule updated successfully",
+          schedule,
+          stops: stopList,
+        };
+      });
+
+      const result = updateSchedule(numericId);
+
+      if (!result.success) {
+        res.status(result.statusCode || 400).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error("Update schedule error:", error);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/admin/schedules/:id", async (req, res) => {
+    console.log(`\n[DELETE] === ENDPOINT CALLED ===`);
+    console.log(`[DELETE] Req.params:`, req.params);
+    console.log(`[DELETE] Req.params.id:`, req.params.id, `(type: ${typeof req.params.id})`);
+    
+    try {
+      const scheduleId = String(req.params?.id || "").trim();
+      console.log(`[DELETE] Extracted scheduleId:`, scheduleId);
+
+      if (!scheduleId) {
+        console.log(`[DELETE] Schedule ID is required - returning 400`);
+        res.status(400).json({ success: false, message: "Schedule ID is required" });
+        return;
+      }
+
+      if (firestoreStore.enabled) {
+        console.log(`[DELETE] Using Firestore mode`);
+        const result = await firestoreStore.deleteSchedule(scheduleId);
+
+        if (!result.success) {
+          console.log(`[DELETE] Firestore delete failed:`, result);
+          res.status(result.statusCode || 400).json(result);
+          return;
+        }
+
+        console.log(`[DELETE] Firestore delete success`);
+        res.json(result);
+        return;
+      }
+
+      console.log(`[DELETE] Using SQLite mode`);
+      // For SQLite, convert string ID to number
+      const numericId = Number(scheduleId);
+      console.log(`[DELETE] Converted ID to number:`, numericId, `(valid: ${Number.isFinite(numericId) && numericId > 0})`);
+      
+      if (!Number.isFinite(numericId) || numericId <= 0) {
+        console.log(`[DELETE] Invalid schedule ID (not a valid number)`);
+        res.status(400).json({ success: false, message: "Invalid schedule ID" });
+        return;
+      }
+
+      // Debug: Log the ID being deleted and what exists in database
+      const allSchedules = db.prepare("SELECT id FROM schedules ORDER BY id DESC").all();
+      const availableIds = allSchedules.map(s => s.id);
+      console.log(`[DELETE] Attempting to delete schedule ID ${numericId}`);
+      console.log(`[DELETE] Available schedule IDs in DB: [${availableIds.join(', ')}]`);
+
+      const deleteSchedule = db.transaction((id) => {
+        console.log(`[DELETE] Inside transaction, checking if ID ${id} exists...`);
+        const existing = db.prepare("SELECT id FROM schedules WHERE id = ? LIMIT 1").get(id);
+        console.log(`[DELETE] Query result:`, existing);
+
+        if (!existing) {
+          const msg = availableIds.length > 0 
+            ? `Schedule ID ${id} not found. Available IDs: [${availableIds.join(', ')}]`
+            : `Schedule ID ${id} not found. No schedules exist.`;
+          console.log(`[DELETE] ${msg}`);
+          return { success: false, statusCode: 404, message: msg };
+        }
+
+        console.log(`[DELETE] ID ${id} found! Deleting...`);
+        db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+        console.log(`[DELETE] Successfully deleted schedule ID ${id}`);
+
+        return { success: true, message: "Schedule deleted successfully" };
+      });
+
+      const result = deleteSchedule(numericId);
+      console.log(`[DELETE] Transaction result:`, result);
+
+      if (!result.success) {
+        console.log(`[DELETE] Sending error response with status ${result.statusCode || 400}:`, result);
+        res.status(result.statusCode || 400).json(result);
+        return;
+      }
+
+      console.log(`[DELETE] Sending success response:`, result);
+      res.json(result);
+    } catch (error) {
+      console.error(`[DELETE] ❌ Catch block - error:`, error);
+      console.error(`[DELETE] Error details:`, {
+        message: error.message,
+        stack: error.stack,
+      });
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
   
   if (process.env.NODE_ENV !== "production") {
+    // List all registered routes before adding Vite
+    console.log(`\n[ROUTES] All registered Express routes:`);
+    const routes = [];
+    app._router.stack.forEach((middleware) => {
+      if (middleware.route) {
+        const methods = Object.keys(middleware.route.methods);
+        routes.push(`${methods.map(m => m.toUpperCase()).join(',')} ${middleware.route.path}`);
+      }
+    });
+    routes.forEach(r => console.log(`  ${r}`));
+    console.log(`[ROUTES] Total routes: ${routes.length}\n`);
+
+    // Add a catch-all for unmatched API routes BEFORE Vite middleware
+    app.use('/api', (req, res, next) => {
+      console.log(`[API-404] No route matched for ${req.method} ${req.path}`);
+      res.status(404).json({ 
+        success: false, 
+        message: `API endpoint not found: ${req.method} ${req.path}` 
+      });
+    });
+
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1497,6 +2131,7 @@ async function startServer() {
       },
       appType: "spa",
     });
+    console.log(`[VITE] Adding Vite middleware now...`);
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, "dist")));

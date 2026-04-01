@@ -18,13 +18,26 @@ export const api = {
   getScheduleStops: (scheduleId) =>
     fetch(`/api/schedules/${scheduleId}/stops`).then(r => r.json()),
 
-  book: ({ scheduleId, seatNumber, passengerName, passengerAge, passengerGender, userId = 1 }) =>
+  book: ({
+    scheduleId,
+    seatNumber,
+    passengerName,
+    passengerAge,
+    passengerGender,
+    boardingStop,
+    dropStop,
+    ticketCount,
+    userId = 1
+  }) =>
     fetch('/api/bookings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         schedule_id: scheduleId,
         seat_number: seatNumber,
+        ticket_count: ticketCount,
+        boarding_stop: boardingStop,
+        drop_stop: dropStop,
         user_id: userId,
         passenger_name: passengerName,
         passenger_age: passengerAge,

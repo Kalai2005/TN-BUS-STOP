@@ -152,8 +152,15 @@ export const ConductorScan = () => {
   };
 
   const handleIssuePhysicalTicket = async () => {
-    if (!scannedBooking?.id) {
+    if (!scannedBooking) {
       setFeedback({ type: 'error', message: 'Scan a valid ticket first.' });
+      return;
+    }
+
+    // Validate booking ID
+    const bookingId = Number(scannedBooking.id);
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      setFeedback({ type: 'error', message: `Invalid booking ID: ${scannedBooking.id}. Please scan again.` });
       return;
     }
 
@@ -162,7 +169,7 @@ export const ConductorScan = () => {
 
     try {
       const response = await api.issuePhysicalTicket({
-        bookingId: scannedBooking.id,
+        bookingId: bookingId,
         conductorId: conductorId.trim() || 'conductor',
       });
 
