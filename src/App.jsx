@@ -17,7 +17,9 @@ import { SearchBus } from './pages/SearchBus';
 import { RouteTracking } from './pages/RouteTracking';
 import { QRTicket } from './pages/QRTicket';
 import { ConductorScan } from './pages/ConductorScan';
+import { Chatbot } from './pages/Chatbot';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { ChatbotWidget } from './components/ChatbotWidget';
 import { LanguageProvider } from './context/LanguageContext';
 
 // Styles
@@ -28,6 +30,8 @@ import './styles/Login.css';
 import './styles/Admin.css';
 import './styles/Booking.css';
 import './styles/support.css';
+import './styles/Chatbot.css';
+import './styles/ChatbotWidget.css';
 
 export default function App() {
   return (
@@ -43,8 +47,9 @@ export default function App() {
               <Route path="/track" element={<RouteTracking />} />
               <Route path="/ticket" element={<QRTicket />} />
               <Route path="/conductor" element={<ProtectedRoute><ConductorScan /></ProtectedRoute>} />
-              <Route path="/book/:id" element={<Booking />} />
-              <Route path="/my-bookings" element={<MyBookings />} />
+              <Route path="/chatbot" element={<ProtectedRoute><Chatbot /></ProtectedRoute>} />
+              <Route path="/book/:id" element={<ProtectedRoute><Booking /></ProtectedRoute>} />
+              <Route path="/my-bookings" element={<ProtectedRoute><MyBookings /></ProtectedRoute>} />
               <Route path="/admin" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
@@ -54,6 +59,7 @@ export default function App() {
               <Route path="/support" element={<Support />} />
             </Routes>
           </main>
+          <ChatbotWidget />
           <Footer />
         </div>
       </Router>

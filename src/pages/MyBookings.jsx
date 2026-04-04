@@ -60,7 +60,6 @@ export const MyBookings = () => {
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState(null);
   const [selectedBooking, setSelectedBooking] = useState(null);
-  const [selectedSchedule, setSelectedSchedule] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const formatTime = (value) => {
@@ -79,6 +78,15 @@ export const MyBookings = () => {
   const formatSeat = (seatNumber) => {
     if (!seatNumber || seatNumber === 'N/A') return text.allocatedBoarding;
     return seatNumber;
+  };
+
+  const formatBookingDate = (value, pattern = 'PPP') => {
+    if (!value) return 'N/A';
+
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return 'N/A';
+
+    return format(date, pattern);
   };
 
   const getDayOffset = (departure, arrival) => {
@@ -106,57 +114,59 @@ export const MyBookings = () => {
     return dayOffset;
   };
 
+  const normalizeBooking = (booking = {}) => {
+    const bookingId = booking.id || booking._id || booking.bookingId || '';
+    const seatNumbers = Array.isArray(booking.seatNumbers) ? booking.seatNumbers : [];
+    const passengerName = booking.passenger_name
+      || booking.passengerName
+      || booking.userId?.name
+      || 'N/A';
+
+    return {
+      ...booking,
+      id: bookingId,
+      booking_date: booking.booking_date || booking.createdAt || booking.journeyDate || null,
+      qr_code: booking.qr_code || booking.qrCode || `TICKET-${String(bookingId).slice(-8).toUpperCase()}`,
+      qr_download_url: booking.qr_download_url || '',
+      source: booking.source || booking.routeId?.source || booking.boardingPoint || 'N/A',
+      destination: booking.destination || booking.routeId?.destination || booking.droppingPoint || 'N/A',
+      fare: booking.totalPrice ?? booking.total_fare ?? booking.fare ?? booking.routeId?.basePrice ?? 0,
+      distance_km: booking.distance_km ?? booking.routeId?.distance ?? 0,
+      operator: booking.operator || booking.busId?.operatorName || 'N/A',
+      bus_type: booking.bus_type || booking.busId?.busType || 'N/A',
+      bus_number: booking.bus_number || booking.busId?.busNumber || 'N/A',
+      departure_time: booking.departure_time || booking.routeId?.stops?.[0]?.stopTime || 'N/A',
+      arrival_time: booking.arrival_time || booking.routeId?.stops?.[Math.max((booking.routeId?.stops?.length || 1) - 1, 0)]?.stopTime || 'N/A',
+      passenger_name: passengerName,
+      passenger_age: booking.passenger_age ?? booking.passengerAge ?? 'N/A',
+      passenger_gender: booking.passenger_gender ?? booking.passengerGender ?? 'N/A',
+      seat_number: booking.seat_number || (seatNumbers.length ? seatNumbers.join(', ') : 'N/A'),
+    };
+  };
+
   useEffect(() => {
     fetchBookings();
   }, []);
 
-  useEffect(() => {
-    const loadScheduleDetails = async () => {
-      if (!selectedBooking?.schedule_id) {
-        setSelectedSchedule(null);
-        return;
-      }
-
-      try {
-        const schedule = await api.getScheduleById(selectedBooking.schedule_id);
-
-        if (schedule && schedule.success !== false) {
-          setSelectedSchedule(schedule);
-          return;
-        }
-      } catch (err) {
-        console.error('Failed to load schedule details:', err);
-      }
-
-      setSelectedSchedule(null);
-    };
-
-    loadScheduleDetails();
-  }, [selectedBooking]);
-
   const fetchBookings = () => {
     setLoading(true);
-    api.getUserBookings(1)
+    api.getUserBookings()
       .then(data => {
-        setBookings(data);
+        const normalized = Array.isArray(data)
+          ? data.map((item) => normalizeBooking(item))
+          : [];
+
+        setBookings(normalized);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error('Failed to load bookings:', err);
+        setBookings([]);
         setLoading(false);
       });
   };
 
-  const activeBooking = selectedBooking
-    ? {
-        ...selectedBooking,
-        fare: selectedBooking.total_fare ?? selectedBooking.fare ?? selectedSchedule?.fare,
-        distance_km: selectedSchedule?.distance_km ?? selectedBooking.distance_km,
-        operator: selectedSchedule?.operator ?? selectedBooking.operator,
-        bus_type: selectedSchedule?.bus_type ?? selectedBooking.bus_type,
-        bus_number: selectedSchedule?.bus_number ?? selectedBooking.bus_number,
-        departure_time: selectedSchedule?.departure_time ?? selectedBooking.departure_time,
-        arrival_time: selectedSchedule?.arrival_time ?? selectedBooking.arrival_time,
-        source: selectedSchedule?.source ?? selectedBooking.source,
-        destination: selectedSchedule?.destination ?? selectedBooking.destination,
-      }
-    : null;
+  const activeBooking = selectedBooking ? normalizeBooking(selectedBooking) : null;
 
   const bookingDayOffset = activeBooking
     ? getDayOffset(activeBooking.departure_time, activeBooking.arrival_time)
@@ -166,13 +176,8 @@ export const MyBookings = () => {
     if (!cancellingId) return;
     setIsProcessing(true);
     try {
-      const res = await fetch(`/api/bookings/${cancellingId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'cancelled' })
-      });
-      if (res.ok) {
-        
+      const result = await api.cancelBooking(cancellingId, 'Cancelled by user');
+      if (result?.success !== false) {
         fetchBookings();
         setCancellingId(null);
       }
@@ -209,7 +214,7 @@ export const MyBookings = () => {
 
                 <div className="modal-status-strip">
                   <span className="modal-status-pill">{activeBooking.status}</span>
-                  <span className="modal-status-pill light">Booked on {format(new Date(activeBooking.booking_date), 'dd MMM yyyy')}</span>
+                  <span className="modal-status-pill light">Booked on {formatBookingDate(activeBooking.booking_date, 'dd MMM yyyy')}</span>
                 </div>
 
                 <div className="modal-highlight-grid">
@@ -235,7 +240,7 @@ export const MyBookings = () => {
                 </div>
 
                 <div className="modal-qr-container">
-                  <QRCodeSVG value={activeBooking.qr_code} size={180} />
+                  <QRCodeSVG value={activeBooking.qr_download_url || activeBooking.qr_code} size={180} />
                   <div className="qr-id">{activeBooking.qr_code}</div>
                 </div>
 
@@ -340,9 +345,9 @@ export const MyBookings = () => {
         {loading ? (
           <div className="loading-state">{text.loading}</div>
         ) : bookings.length > 0 ? (
-          bookings.map((b) => (
+          bookings.map((b, index) => (
             <div 
-              key={b.id} 
+              key={b._id || b.id || b.bookingId || b.qr_code || `${String(b.booking_date || 'booking')}-${index}`}
               className={`booking-card ${b.status === 'confirmed' ? 'clickable' : ''}`}
               onClick={() => b.status === 'confirmed' && setSelectedBooking(b)}
             >
@@ -352,7 +357,7 @@ export const MyBookings = () => {
                 </div>
                 <div className="route-details">
                   <div className="route-text">{b.source} → {b.destination}</div>
-                  <div className="date-text">{format(new Date(b.booking_date), 'PPP')}</div>
+                  <div className="date-text">{formatBookingDate(b.booking_date, 'PPP')}</div>
                   <div className="passenger-mini-info">
                     {b.passenger_name} ({b.passenger_age}, {b.passenger_gender})
                   </div>
@@ -369,7 +374,7 @@ export const MyBookings = () => {
                   <button 
                     onClick={(e) => {
                       e.stopPropagation();
-                      setCancellingId(b.id);
+                      setCancellingId(b.id || b._id || b.bookingId);
                     }}
                     className="cancel-booking-btn"
                     title="Cancel Booking"

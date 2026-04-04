@@ -88,6 +88,74 @@
 .login-btn:hover {
   background-color: #27272a;
 }
+.logout-btn {
+  border: 1px solid #d4d4d8;
+  background-color: #ffffff;
+  color: #18181b;
+  padding: 8px 14px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logout-btn:hover {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+.nav-profile-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.nav-profile-chip,
+.mobile-profile-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: #f4f4f5;
+  border: 1px solid #e4e4e7;
+  border-radius: 9999px;
+  padding: 4px 10px 4px 4px;
+}
+.nav-profile-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background-color: #059669;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+.nav-profile-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.nav-profile-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #18181b;
+  line-height: 1.1;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-profile-email {
+  font-size: 11px;
+  color: #71717a;
+  line-height: 1.1;
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-my-bookings-link {
+  white-space: nowrap;
+}
 .language-btn {
   border: 1px solid #d4d4d8;
   background-color: #ffffff;
@@ -126,6 +194,14 @@
   color: #52525b;
   font-weight: 500;
   display: block;
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+.mobile-logout-link {
+  color: #dc2626;
 }
 @media (max-width: 768px) {
   .mobile-toggle { display: flex; }

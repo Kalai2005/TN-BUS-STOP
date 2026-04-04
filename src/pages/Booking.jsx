@@ -56,6 +56,7 @@ export const Booking = () => {
         ticketCount: 'டிக்கெட் எண்ணிக்கை',
         invalidLocalStops: 'சரியான ஏறும் மற்றும் இறங்கும் நிறுத்தத்தை தேர்வு செய்யவும்.',
         invalidTicketCount: 'குறைந்தது 1 மற்றும் அதிகபட்சம் 10 டிக்கெட் மட்டும் தேர்வு செய்யலாம்.',
+        loginRequired: 'முன்பதிவை தொடர முதலில் உள்நுழையவும்.',
         passengerDetails: 'பயணி விவரங்கள்',
         fullName: 'முழு பெயர்',
         age: 'வயது',
@@ -112,6 +113,7 @@ export const Booking = () => {
         ticketCount: 'Number of Tickets',
         invalidLocalStops: 'Please select valid boarding and drop stops.',
         invalidTicketCount: 'Ticket count must be between 1 and 10.',
+        loginRequired: 'Please log in to continue booking.',
         passengerDetails: 'Passenger Details',
         fullName: 'Full Name',
         age: 'Age',
@@ -362,7 +364,14 @@ export const Booking = () => {
   const serviceFee = 0;
   const totalAmount = baseFare + serviceFee;
   const bookingDayOffset = getDayOffset(busDetails?.departureTime, busDetails?.arrivalTime);
-  const ticketDownloadUrl = ticket?.qr_download_url || '';
+  const rawTicketDownloadUrl = String(ticket?.qr_download_url || '');
+  const ticketDownloadUrl = (
+    typeof window !== 'undefined' &&
+    window.location.protocol === 'https:' &&
+    rawTicketDownloadUrl.startsWith('http://')
+  )
+    ? rawTicketDownloadUrl.replace(/^http:\/\//i, 'https://')
+    : rawTicketDownloadUrl;
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -429,6 +438,13 @@ export const Booking = () => {
   };
 
   const handleBook = async () => {
+    const authToken = typeof window !== 'undefined' ? localStorage.getItem('authToken') : null;
+    if (!authToken) {
+      setError(text.loginRequired);
+      navigate('/login');
+      return;
+    }
+
     const validationError = validatePassenger();
     if (validationError) {
       setError(validationError);
@@ -460,6 +476,8 @@ export const Booking = () => {
         ticketCount: isLocalBus ? Number(localTicketCount) : 1,
         boardingStop: isLocalBus ? localTrip.boardingStop : null,
         dropStop: isLocalBus ? localTrip.dropStop : null,
+        totalPrice: totalAmount,
+        pricePerSeat: resolvedPerTicketFare,
         passengerName: passenger.name.trim(),
         passengerAge: Number(passenger.age),
         passengerGender: passenger.gender,
@@ -854,8 +872,7 @@ export const Booking = () => {
               <a
                 className="download-ticket-link"
                 href={ticketDownloadUrl}
-                target="_blank"
-                rel="noopener noreferrer"
+                download
               >
                 {text.downloadTicketPdf}
               </a>
